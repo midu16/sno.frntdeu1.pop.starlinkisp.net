@@ -1,0 +1,17 @@
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: master
+  name: 99-masters-chrony-configuration
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+      - contents:
+          source: data:text/plain;charset=utf-8;base64,c2VydmVyIHRpbWUuY2xvdWRmbGFyZS5jb20gaWJ1cnN0CmRyaWZ0ZmlsZSAvdmFyL2xpYi9jaHJvbnkvZHJpZnQKbWFrZXN0ZXAgMS4wIDMKcnRjc3luYwprZXlmaWxlIC9ldGMvY2hyb255LmtleXMKbGVhcHNlY3R6IHJpZ2h0L1VUQwpsb2dkaXIgL3Zhci9sb2cvY2hyb255CmJpbmRjbWRhZGRyZXNzIDo6CmFsbG93IDE5Mi4xNjguMTI1LjAvMjQK
+        mode: 420
+        overwrite: true
+        path: /etc/chrony.conf

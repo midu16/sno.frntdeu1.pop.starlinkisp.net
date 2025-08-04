@@ -1,0 +1,15 @@
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: master
+  name: 99-masters-disable-crio-wipe
+spec:
+  config:
+    ignition:
+      version: 2.2.0
+    systemd:
+      units:
+      - enabled: false
+        mask: true
+        name: crio-wipe.service

@@ -1,0 +1,21 @@
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: master
+  name: 99-master-pstore
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+      - contents:
+          source: data:;base64,ZCAvdmFyL2xpYi9zeXN0ZW1kL3BzdG9yZSAwNzU1IHJvb3Qgcm9vdCAxNGQK
+        mode: 420
+        overwrite: true
+        path: /etc/tmpfiles.d/systemd-pstore.conf
+    systemd:
+      units:
+      - enabled: true
+        name: systemd-pstore.service

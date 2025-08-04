@@ -1,0 +1,8 @@
+# Explicit sensitive files inside workdir
+workdir/access
+workdir/agent.x86_64.iso
+workdir/auth/kubeadmin-password
+workdir/auth/kubeconfig
+workdir/.openshift_install_state.json
+workdir/.openshift_install.log
+openshift-install

@@ -1,0 +1,26 @@
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovOperatorConfig
+metadata:
+  name: default
+  namespace: openshift-sriov-network-operator
+spec:
+  disableDrain: true
+---
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: sriov-config-netdevice-eno2np1
+  namespace: openshift-sriov-network-operator
+spec:
+  deviceType: netdevice
+  isRdma: true
+  mtu: 9000
+  needVhostNet: true
+  nicSelector:
+    pfNames:
+    - eno2np1#0-29
+  nodeSelector:
+    feature.node.kubernetes.io/network-sriov.capable: 'true'
+  numVfs: 50
+  priority: 50
+  resourceName: sriov_netdevice_eno2np1

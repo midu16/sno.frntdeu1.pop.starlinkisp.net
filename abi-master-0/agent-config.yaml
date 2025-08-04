@@ -1,0 +1,36 @@
+apiVersion: v1alpha1
+metadata:
+  name: sno
+rendezvousIP: 192.168.1.133
+additionalNTPSources:
+  - 192.168.1.1
+hosts:
+  - hostname: master-0
+    role: master
+    rootDeviceHints:
+      deviceName: "/dev/disk/by-path/pci-0000:02:00.0-scsi-0:0:0:0"
+    interfaces:
+     - name: eno1np0
+       macAddress: 84:16:0c:2a:83:fe
+    networkConfig:
+      interfaces:
+        - name: eno1np0
+          type: ethernet
+          state: up
+          mac-address: 84:16:0c:2a:83:fe
+          ipv4:
+            enabled: true
+            address:
+              - ip: 192.168.1.133
+                prefix-length: 24
+            dhcp: false
+      dns-resolver:
+        config:
+          server:
+            - 192.168.1.1
+      routes:
+        config:
+          - destination: 0.0.0.0/0
+            next-hop-address: 192.168.1.1
+            next-hop-interface: eno1np0
+            table-id: 254

@@ -1,0 +1,26 @@
+apiVersion: performance.openshift.io/v2
+kind: PerformanceProfile
+metadata:
+  name: perf-profile-48c
+spec:
+  cpu:
+    isolated: "2-19,22-47"    # Reserve CPUs for workloads
+    reserved: "0-1,20-21"     # Reserve CPUs for platform
+    balanceIsolated: false    # Disable kernel scheduler balancing
+  hugepages:
+    defaultHugepagesSize: "1G"
+    pages:
+      - size: "1G"
+        count: 32             # adjust based on workload requirements
+        node: 0
+  realTimeKernel:
+    enabled: false
+  numa:
+    topologyPolicy: "restricted"
+  workloadHints:
+    realTime: false
+    highPowerConsumption: false
+    perPodPowerManagement: true
+  globallyDisableIrqLoadBalancing: false
+  nodeSelector:
+    node-role.kubernetes.io/master: ""

@@ -3,7 +3,7 @@ metadata:
   name: sno
 rendezvousIP: 192.168.1.133
 additionalNTPSources:
-  - 192.168.1.1
+  - 192.168.1.21
 hosts:
   - hostname: master-0
     role: master

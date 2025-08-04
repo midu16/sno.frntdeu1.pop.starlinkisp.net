@@ -12,6 +12,7 @@ This is the repo of `sno.frntdeu1.pop.starlinkisp.net` OpenShift4 cluster
     - [Mount the image to the server BMC:](#mount-the-image-to-the-server-bmc)
     - [Monitoring the installation process:](#monitoring-the-installation-process)
   - [Patching all the installplans](#patching-all-the-installplans)
+  - [Installing the Hub Specific Operators on the `isolated` cores](#installing-the-hub-specific-operators-on-the-isolated-cores)
 
 
 ## How to install
@@ -41,6 +42,8 @@ Note, replace the `quay.io/openshift-release-dev/ocp-release@sha256:6a653700eaae
 ```bash
 scp -r $(pwd)/workdir/agent.x86_64.iso rock@192.168.1.21:/apps/webcache/OSs/
 ```
+or use the [go-webcache](./go-webcache/README.md) from your workingstation and expose the `agent.x86_64.iso` file to the server BMC.
+
 ### Mount the image to the server BMC:
 
 ### Monitoring the installation process:
@@ -61,3 +64,6 @@ oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.me
 | xargs -n2 sh -c 'oc patch installplan $1 -n $0 --type merge -p "{\"spec\": {\"approved\": true}}"' 
 ```
 
+## Installing the Hub Specific Operators on the `isolated` cores
+
+As configured on the [pao.yaml](./abi-master-0/openshift/pao.yaml) we are still having at least 44 cores available for the `workload`.

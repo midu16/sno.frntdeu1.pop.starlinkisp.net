@@ -13,6 +13,16 @@ This is the repo of `sno.frntdeu1.pop.starlinkisp.net` OpenShift4 cluster
     - [Monitoring the installation process:](#monitoring-the-installation-process)
   - [Patching all the installplans](#patching-all-the-installplans)
   - [Installing the Hub Specific Operators on the `isolated` cores](#installing-the-hub-specific-operators-on-the-isolated-cores)
+- [README.md Checklist](#readmemd-checklist)
+  - [1. Project Overview](#1-project-overview)
+  - [2. Architecture \& Components](#2-architecture--components)
+  - [3. Installation \& Setup](#3-installation--setup)
+  - [4. Usage](#4-usage)
+  - [5. Performance \& Scaling](#5-performance--scaling)
+  - [6. Testing \& Validation](#6-testing--validation)
+  - [7. Troubleshooting](#7-troubleshooting)
+  - [8. Contribution Guidelines](#8-contribution-guidelines)
+  - [9. Licensing \& References](#9-licensing--references)
 
 
 ## How to install
@@ -67,3 +77,79 @@ oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.me
 ## Installing the Hub Specific Operators on the `isolated` cores
 
 As configured on the [pao.yaml](./abi-master-0/openshift/pao.yaml) we are still having at least 44 cores available for the `workload`.
+
+
+# README.md Checklist
+
+Use this checklist when creating or updating a project README.
+
+---
+
+## 1. Project Overview
+- [x] **Project Name**: Clearly stated at the top.
+- [ ] **Description**: Concise explanation of what the project does.
+- [ ] **Use Cases**: Why this project exists and problems it solves.
+- [ ] **Status**: (e.g., Alpha, Beta, Production-ready).
+
+---
+
+## 2. Architecture & Components
+- [ ] **High-Level Diagram**: Optional but recommended.
+- [ ] **Key Components**: Briefly describe services, pods, or modules.
+- [ ] **Dependencies**: List core dependencies (e.g., OpenShift version, kube-burner, Loki, etc.).
+---
+
+## 3. Installation & Setup
+- [ ] **Prerequisites**:
+  - [ ] Required tools (kubectl, oc, Helm, etc.)
+  - [ ] Required cluster version / OS version
+- [ ] **Installation Steps**: Step-by-step instructions.
+- [ ] **Configuration**:
+  - [ ] ConfigMaps and Secrets explained
+  - [ ] Environment variables documented
+  - [ ] Example configuration provided
+
+---
+
+## 4. Usage
+- [ ] **Basic Commands**: Common CLI invocations or scripts.
+- [ ] **Examples**: Realistic usage examples (YAML manifests, workload runs, etc.).
+- [ ] **Logs & Monitoring**: How to check logs, metrics, or troubleshooting info.
+
+---
+
+## 5. Performance & Scaling
+- [ ] **Supported Scale**: Max tested pods/namespaces/nodes.
+- [ ] **Resource Requirements**: CPU/memory/storage/I/O requirements.
+- [ ] **Tuning Tips**: Flags, sysctl params, or cluster settings.
+- [ ] **Limitations**: Known bottlenecks or unsupported scenarios.
+
+---
+
+## 6. Testing & Validation
+- [ ] **How to Run Tests**: Unit, integration, or performance tests.
+- [ ] **Validation Checklist**: (e.g., pods running, metrics collected, logs available).
+- [ ] **CI/CD Integration**: Links or instructions if automated.
+
+---
+
+## 7. Troubleshooting
+- [ ] **Common Issues**: List error messages and solutions.
+- [ ] **FAQ Section**: Short Q&A for known questions.
+- [ ] **Debugging Commands**: Helpful `kubectl`, `oc`, or system commands.
+
+---
+
+## 8. Contribution Guidelines
+- [ ] **How to Contribute**: PR process, coding standards, commit message format.
+- [ ] **Issue Reporting**: Where and how to report bugs.
+- [ ] **Code of Conduct**: (if applicable).
+
+---
+
+## 9. Licensing & References
+- [ ] **License**: MIT, Apache 2.0, etc.
+- [ ] **Acknowledgments**: Tools, libraries, or partners (e.g., Samsung collaboration).
+- [ ] **References**: Links to docs, specs, or research.
+
+---

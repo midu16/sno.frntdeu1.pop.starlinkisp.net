@@ -12,14 +12,14 @@ data:
       retention: 15d
       volumeClaimTemplate:
         spec:
-          storageClassName: ocs-external-storagecluster-ceph-rbd
+          storageClassName: lvms-vg1
           resources:
             requests:
               storage: 100Gi
     alertmanagerMain:
       volumeClaimTemplate:
         spec:
-          storageClassName: ocs-external-storagecluster-ceph-rbd
+          storageClassName: lvms-vg1
           resources:
             requests:
               storage: 20Gi

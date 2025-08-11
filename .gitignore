@@ -7,3 +7,4 @@ workdir/.openshift_install_state.json
 workdir/.openshift_install.log
 openshift-install
 go-webcache/webcache
+.oc-mirror.log

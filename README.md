@@ -1,6 +1,6 @@
 # ABI `master-0` deployment
 
-This is the repo of `sno.frntdeu1.pop.starlinkisp.net` OpenShift4 cluster
+This project provides installation, configuration, and automation steps for deploying an **air-gapped Single Node OpenShift (SNO) cluster** (`master-0`) on the `sno.frntdeu1.pop.starlinkisp.net` environment, including preparing installation media, bootstrapping the cluster, patching install plans, and installing hub-specific operators pinned to isolated CPU cores.
 
 ## Table of Contents
 - [ABI `master-0` deployment](#abi-master-0-deployment)
@@ -13,6 +13,7 @@ This is the repo of `sno.frntdeu1.pop.starlinkisp.net` OpenShift4 cluster
     - [Monitoring the installation process:](#monitoring-the-installation-process)
   - [Patching all the installplans](#patching-all-the-installplans)
   - [Installing the Hub Specific Operators on the `isolated` cores](#installing-the-hub-specific-operators-on-the-isolated-cores)
+  - [Use Cases](#use-cases)
 - [README.md Checklist](#readmemd-checklist)
   - [1. Project Overview](#1-project-overview)
   - [2. Architecture \& Components](#2-architecture--components)
@@ -67,7 +68,12 @@ Note, Once the installation its done, proceed by installing the day2-operators a
 
 ## Patching all the installplans
 
-Once the SNO its available, the `day2-operators` are pending for Manual approval so the installation starts:
+Once the SNO its available, install the `day2-operators`:
+```bash
+oc create -f ./abi-master-0/extra-manifests/operator-install/
+```
+
+Once the `day2-operators` are pending for Manual approval so the installation starts:
 
 ```bash
 oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' \
@@ -79,6 +85,21 @@ oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.me
 As configured on the [pao.yaml](./abi-master-0/openshift/pao.yaml) we are still having at least 44 cores available for the `workload`.
 
 
+## Use Cases
+
+This project exists to **simplify and standardize the deployment of an air-gapped Single Node OpenShift (SNO) cluster** in the `sno.frntdeu1.pop.starlinkisp.net` environment.
+
+It solves problems such as:
+
+* **Air-gapped deployment complexity** – provides a repeatable method for generating and serving installation media without internet access.
+* **Manual operator installation delays** – includes scripts to auto-approve install plans for Day-2 operators.
+* **CPU resource isolation** – ensures hub-specific operators are pinned to isolated cores, preserving compute capacity for workloads.
+* **Configuration drift** – keeps install and config files (`agent-config.yaml`, `install-config.yaml`, `pao.yaml`) aligned with environment requirements.
+* **Operational errors** – documents exact commands, environment settings, and monitoring steps to reduce trial-and-error during deployment.
+* **Lifecycle Management** – documents exact commands to follow and document specific use-cases during the `sno.frntdeu1.pop.starlinkisp.net` environment lifecycle.
+
+
+
 # README.md Checklist
 
 Use this checklist when creating or updating a project README.
@@ -87,7 +108,7 @@ Use this checklist when creating or updating a project README.
 
 ## 1. Project Overview
 - [x] **Project Name**: Clearly stated at the top.
-- [ ] **Description**: Concise explanation of what the project does.
+- [x] **Description**: Concise explanation of what the project does.
 - [ ] **Use Cases**: Why this project exists and problems it solves.
 - [ ] **Status**: (e.g., Alpha, Beta, Production-ready).
 
@@ -103,7 +124,7 @@ Use this checklist when creating or updating a project README.
 - [ ] **Prerequisites**:
   - [ ] Required tools (kubectl, oc, Helm, etc.)
   - [ ] Required cluster version / OS version
-- [ ] **Installation Steps**: Step-by-step instructions.
+- [x] **Installation Steps**: Step-by-step instructions.
 - [ ] **Configuration**:
   - [ ] ConfigMaps and Secrets explained
   - [ ] Environment variables documented

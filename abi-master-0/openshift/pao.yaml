@@ -11,20 +11,16 @@ spec:
     defaultHugepagesSize: "1G"
     pages:
       - size: "1G"
-        count: 28             # adjust based on workload requirements
+        count: 30             # adjust based on workload requirements
   realTimeKernel:
     enabled: false
   numa:
     # All guaranteed QoS containers get resources from a single NUMA node
-    topologyPolicy: "single-numa-node"
-  net:
-    userLevelNetworking: false
+    topologyPolicy: "restricted"
   workloadHints:
     realTime: false
     highPowerConsumption: false
     perPodPowerManagement: true
-  powerManagement:
-    mode: "powersave"         # set scaling governor to powersave
   globallyDisableIrqLoadBalancing: false
   nodeSelector:
     node-role.kubernetes.io/master: ""

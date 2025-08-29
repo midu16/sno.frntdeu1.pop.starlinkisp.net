@@ -23,10 +23,28 @@ ISO_URL="http://${REMOTE_HOST}:8080/OSs/agent.x86_64.iso"
 INSTALLER="./openshift-install"
 
 # Define OCP version
-OCP_VERSION="4.16.24"
+OCP_VERSION="4.16.45"
+
+# Variables
+SSH_KEY="$HOME/.ssh/id_ed25519.pub"
+
+# Check if the SSH key exists
+if [ ! -f "$SSH_KEY" ]; then
+    echo "SSH key not found. Generating a new ed25519 key..."
+    echo "Generating SSH key at $SSH_KEY ..."
+    ssh-keygen -t ed25519 -f "${SSH_KEY%.*}" -N "" -q
+    echo "SSH key generated."
+fi
+
+# Share the SSH key with the remote host
+echo "============================================================================================"
+echo "Copying SSH key to $REMOTE_USER@$REMOTE_HOST ..."
+sshpass -p "$IDRAC_PW" ssh-copy-id -i "$SSH_KEY" -o StrictHostKeyChecking=no "$REMOTE_USER@$REMOTE_HOST"
+echo "SSH key copied to $REMOTE_USER@$REMOTE_HOST"
+echo "============================================================================================"
 
 # Path to Docker auth file
-REGISTRY_AUTH_FILE="${HOME}/.docker/config.json"
+REGISTRY_AUTH_FILE="./config.json"
 
 RELEASE_DIGEST=$(oc adm release info quay.io/openshift-release-dev/ocp-release:${OCP_VERSION}-x86_64 \
   --registry-config ${REGISTRY_AUTH_FILE} | awk '/Pull From:/ {print $3}')
@@ -47,7 +65,8 @@ echo "==========================================================================
 # If workdir exists, clean it
 if [ -d "$WORKDIR" ]; then
   echo "Cleaning existing $WORKDIR ..."
-  rm -rf "${WORKDIR:?}/"*
+  rm -rf "${WORKDIR}"
+  rm -rf "${WORKDIR}/.*"
 else
   echo "Creating $WORKDIR ..."
   mkdir -p "$WORKDIR"
@@ -56,7 +75,8 @@ fi
 # Copy openshift directory
 if [ -d "$SRC/openshift" ]; then
   echo "Copying $SRC/openshift -> $WORKDIR/ ..."
-  cp -r "$SRC/openshift" "$WORKDIR/"
+  mkdir -p "$WORKDIR/openshift"
+  cp -r "$SRC/openshift" "$WORKDIR/openshift/"
 else
   echo "ERROR: $SRC/openshift not found!" >&2
   exit 1
@@ -78,8 +98,10 @@ echo "==========================================================================
 
 # Run the openshift-install command
 if [ -x "$INSTALLER" ]; then
-  echo "Running: $INSTALLER agent create image --dir $WORKDIR --log-level debug"
-  "$INSTALLER" agent create image --dir "$WORKDIR" --log-level debug
+  echo "Running: $INSTALLER agent create image --dir $WORKDIR/ --log-level debug"
+  echo "============================================================================================"
+  "$INSTALLER" agent create image --dir "$WORKDIR/" --log-level debug
+  echo "============================================================================================"
 else
   echo "ERROR: $INSTALLER not found or not executable!" >&2
   exit 1
@@ -99,13 +121,6 @@ fi
 echo "✅ Done for generating the agent.x86_64.iso!"
 echo "============================================================================================"
 
-# Power Off server
-echo "Powering off server..."
-curl -sku "$IDRAC_ID:$IDRAC_PW" \
-  -H "Content-Type: application/json" \
-  -X POST \
-  -d '{"ResetType":"ForceOff"}' \
-  https://${IDRAC_IP}/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset | jq .
 
 # Eject virtual media (iDRAC8)
 echo "Ejecting virtual media..."
@@ -123,20 +138,34 @@ curl -sku "$IDRAC_ID:$IDRAC_PW" \
   -d '{"Image": "http://192.168.1.21:8080/OSs/agent.x86_64.iso"}' \
   https://${IDRAC_IP}/redfish/v1/Managers/iDRAC.Embedded.1/VirtualMedia/CD/Actions/VirtualMedia.InsertMedia | jq .
 
-# Set One-Time Boot to Virtual CD/DVD
-echo "Setting one-time boot to virtual CD/DVD..."
+# Set next boot to Virtual CD/DVD
+echo "Setting next boot to Virtual CD/DVD..."
 curl -sku "$IDRAC_ID:$IDRAC_PW" \
   -H "Content-Type: application/json" \
   -X PATCH \
-  -d '{"Boot":{"BootSourceOverrideEnabled":"Once","BootSourceOverrideTarget":"Cd"}}' \
+  -d '{
+        "Boot": {
+          "BootSourceOverrideTarget": "VCD-DVD",
+          "BootSourceOverrideEnabled": "Once"
+        }
+      }' \
   https://${IDRAC_IP}/redfish/v1/Systems/System.Embedded.1 | jq .
 
-# Power On server (iDRAC8)
-echo "Powering on server..."
+
+## Set One-Time Boot to Virtual CD/DVD
+#echo "Setting one-time boot to virtual CD/DVD..."
+#curl -sku "$IDRAC_ID:$IDRAC_PW" \
+#  -H "Content-Type: application/json" \
+#  -X PATCH \
+#  -d '{"Boot":{"BootSourceOverrideEnabled":"Once","BootSourceOverrideTarget":"Cd"}}' \
+#  https://${IDRAC_IP}/redfish/v1/Systems/System.Embedded.1 | jq .
+#
+# Power cycle / restart server
+echo "Restarting server..."
 curl -sku "$IDRAC_ID:$IDRAC_PW" \
   -H "Content-Type: application/json" \
   -X POST \
-  -d '{"ResetType":"On"}' \
+  -d '{"ResetType":"ForceRestart"}' \
   https://${IDRAC_IP}/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset | jq .
 
 # --- Check iDRAC power status ---
@@ -146,6 +175,7 @@ POWER_STATE=$(curl -sku "$IDRAC_ID:$IDRAC_PW" -H "Content-Type: application/json
 
 if [ "$POWER_STATE" == "On" ]; then
   echo "✅ Server is powered ON. Running wait-for install-complete ..."
+  export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
   "$INSTALLER" agent wait-for install-complete --dir "$WORKDIR" --log-level debug
 else
   echo "⚠️ Server power state is: $POWER_STATE"

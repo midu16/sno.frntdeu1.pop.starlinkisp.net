@@ -75,8 +75,8 @@ fi
 # Copy openshift directory
 if [ -d "$SRC/openshift" ]; then
   echo "Copying $SRC/openshift -> $WORKDIR/ ..."
-  mkdir -p "$WORKDIR/openshift"
-  cp -r "$SRC/openshift" "$WORKDIR/openshift/"
+  mkdir -p "$WORKDIR"
+  cp -r "$SRC/openshift" "$WORKDIR/"
 else
   echo "ERROR: $SRC/openshift not found!" >&2
   exit 1
@@ -130,6 +130,9 @@ curl -sku "$IDRAC_ID:$IDRAC_PW" \
   -d '{}' \
   https://${IDRAC_IP}/redfish/v1/Managers/iDRAC.Embedded.1/VirtualMedia/CD/Actions/VirtualMedia.EjectMedia | jq .
 
+
+sleep 20
+
 # Mount (insert) ISO in iDRAC8
 echo "Inserting ISO image..."
 curl -sku "$IDRAC_ID:$IDRAC_PW" \
@@ -145,7 +148,7 @@ curl -sku "$IDRAC_ID:$IDRAC_PW" \
   -X PATCH \
   -d '{
         "Boot": {
-          "BootSourceOverrideTarget": "VCD-DVD",
+          "BootSourceOverrideTarget": "Cd",
           "BootSourceOverrideEnabled": "Once"
         }
       }' \
@@ -176,7 +179,7 @@ POWER_STATE=$(curl -sku "$IDRAC_ID:$IDRAC_PW" -H "Content-Type: application/json
 if [ "$POWER_STATE" == "On" ]; then
   echo "✅ Server is powered ON. Running wait-for install-complete ..."
   export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
-  "$INSTALLER" agent wait-for install-complete --dir "$WORKDIR" --log-level debug
+  "$INSTALLER" agent wait-for install-complete --dir "$WORKDIR"
 else
   echo "⚠️ Server power state is: $POWER_STATE"
   echo "Skipping wait-for install-complete."

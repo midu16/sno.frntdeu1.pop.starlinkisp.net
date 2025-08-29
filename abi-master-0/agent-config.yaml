@@ -11,13 +11,13 @@ hosts:
       deviceName: "/dev/disk/by-path/pci-0000:02:00.0-scsi-0:0:0:0"
     interfaces:
      - name: eno1np0
-       macAddress: 84:16:0c:2a:83:fe
+       macAddress: "84:16:0c:2a:83:fe"
     networkConfig:
       interfaces:
         - name: eno1np0
           type: ethernet
           state: up
-          mac-address: 84:16:0c:2a:83:fe
+          mac-address: "84:16:0c:2a:83:fe"
           ipv4:
             enabled: true
             address:

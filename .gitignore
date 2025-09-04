@@ -1,10 +1,81 @@
-# Explicit sensitive files inside workdir
-workdir/access
-workdir/agent.x86_64.iso
-workdir/auth/kubeadmin-password
-workdir/auth/kubeconfig
-workdir/.openshift_install_state.json
-workdir/.openshift_install.log
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+
+# Build directory
+build/
+dist/
+
+# Logs
+logs/
+*.log
+
+# Configuration files with sensitive data
+go-installer/idrac_config.yaml
+config.json
+idrac_pw.enc
+
+# Work directories
+workdir/
+abi-master-0/
+
+# SSH keys
+*.pem
+*.key
+id_*
+
+# OpenShift installer
 openshift-install
-go-webcache/webcache
-.oc-mirror.log
+
+# ISO files
+*.iso
+
+# Coverage reports
+coverage.out
+coverage.html
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Docker
+.dockerignore
+
+# Environment files
+.env
+.env.local
+.env.*.local
+

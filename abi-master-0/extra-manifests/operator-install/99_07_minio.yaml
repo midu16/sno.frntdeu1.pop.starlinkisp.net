@@ -19,7 +19,8 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 100Gi
+      storage: 50Gi
+  storageClassName: lvms-vg1
   volumeMode: Filesystem
 ---
 kind: Secret

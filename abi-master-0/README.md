@@ -12,6 +12,112 @@ This SNO configuration is designed for a single master node deployment with vari
 - **Network**: `192.168.1.0/24` with static IP `192.168.1.133`
 - **Architecture**: AMD64
 
+## Architecture Diagram
+
+```mermaid
+graph TB
+    subgraph "External Network"
+        GW[Gateway<br/>192.168.1.1]
+        DNS[DNS Server<br/>192.168.1.1]
+        NTP[NTP Server<br/>192.168.1.21]
+    end
+
+    subgraph "SNO Cluster: sno.frntdeu1.pop.starlinkisp.net"
+        subgraph "master-0 Node (192.168.1.133)"
+            subgraph "Control Plane"
+                API[OpenShift API Server]
+                ETCD[etcd]
+                SCHED[Scheduler]
+                CM[Controller Manager]
+            end
+            
+            subgraph "Worker Components"
+                KUBELET[kubelet]
+                CRIO[CRI-O Runtime]
+                OVN[OVN Kubernetes<br/>Networking]
+            end
+            
+            subgraph "Installed Operators"
+                ARGO[ArgoCD<br/>GitOps]
+                LOG[OpenShift Logging<br/>ELK Stack]
+                LVM[LVM Storage]
+                PTP[Precision Time Protocol]
+                SRIOV[SR-IOV]
+                QUAY[Red Hat Quay]
+                MINIO[MinIO Object Storage]
+            end
+            
+            subgraph "Storage"
+                ROOT[Root Device<br/>/dev/disk/by-path/pci-0000:02:00.0-scsi-0:0:0:0]
+                LVMVOL[LVM Volumes]
+                MINIOPV[MinIO PVC<br/>100Gi]
+            end
+            
+            subgraph "Network Interface"
+                ENI[eno1np0<br/>84:16:0c:2a:83:fe]
+            end
+        end
+    end
+
+    subgraph "Cluster Networks"
+        MACHINE[Machine Network<br/>192.168.1.0/24]
+        CLUSTER[Cluster Network<br/>10.128.0.0/14]
+        SERVICE[Service Network<br/>172.30.0.0/16]
+    end
+
+    subgraph "External Services"
+        RHREG[Red Hat Registries<br/>registry.redhat.io<br/>quay.io]
+        RHCONNECT[Red Hat Connect<br/>registry.connect.redhat.com]
+    end
+
+    %% Network Connections
+    ENI --> GW
+    ENI --> DNS
+    ENI --> NTP
+    
+    %% Internal Connections
+    API --> ETCD
+    API --> SCHED
+    API --> CM
+    KUBELET --> CRIO
+    CRIO --> OVN
+    
+    %% Operator Connections
+    ARGO --> API
+    LOG --> API
+    LVM --> LVMVOL
+    MINIO --> MINIOPV
+    SRIOV --> ENI
+    
+    %% Storage Connections
+    ROOT --> LVMVOL
+    LVMVOL --> MINIOPV
+    
+    %% Registry Connections
+    CRIO --> RHREG
+    CRIO --> RHCONNECT
+    
+    %% Network Assignments
+    ENI -.-> MACHINE
+    OVN -.-> CLUSTER
+    OVN -.-> SERVICE
+
+    %% Styling
+    classDef controlPlane fill:#e1f5fe
+    classDef worker fill:#f3e5f5
+    classDef operator fill:#e8f5e8
+    classDef storage fill:#fff3e0
+    classDef network fill:#fce4ec
+    classDef external fill:#f5f5f5
+
+    class API,ETCD,SCHED,CM controlPlane
+    class KUBELET,CRIO,OVN worker
+    class ARGO,LOG,LVM,PTP,SRIOV,QUAY,MINIO operator
+    class ROOT,LVMVOL,MINIOPV storage
+    class ENI,MACHINE,CLUSTER,SERVICE network
+    class GW,DNS,NTP,RHREG,RHCONNECT external
+```
+
 ## Directory Structure
 
 ```

@@ -1,0 +1,27 @@
+name: SNO OpenShift Install
+
+on:
+  workflow_dispatch:
+    inputs:
+      ocp_version:
+        description: "OpenShift version to install (e.g. 4.22.0-ec.3, 4.18.6)"
+        required: true
+        default: "4.22.0-ec.3"
+        type: string
+
+jobs:
+  install:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: make deps
+
+      - name: Run SNO install
+        env:
+          IDRAC_PW: ${{ secrets.IDRAC_PW }}
+          IDRAC_IP: "192.168.1.228"
+          IDRAC_USER: "root"
+        run: make install OCP_VERSION=${{ inputs.ocp_version }}

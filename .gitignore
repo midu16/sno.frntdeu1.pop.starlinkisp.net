@@ -33,6 +33,7 @@ idrac_pw.enc
 # Work directories
 workdir/
 abi-master-0/
+bin/
 
 # SSH keys
 *.pem
@@ -73,6 +74,12 @@ temp/
 
 # Docker
 .dockerignore
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
 
 # Environment files
 .env

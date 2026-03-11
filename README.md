@@ -1,176 +1,126 @@
-# ABI `master-0` deployment
+# SNO deployment for sno.frntdeu1.pop.starlinkisp.net
 
-This project provides installation, configuration, and automation steps for deploying an **air-gapped Single Node OpenShift (SNO) cluster** (`master-0`) on the `sno.frntdeu1.pop.starlinkisp.net` environment, including preparing installation media, bootstrapping the cluster, patching install plans, and installing hub-specific operators pinned to isolated CPU cores.
+This repository automates the deployment of an **air-gapped Single Node OpenShift (SNO) cluster** on a **Dell PowerEdge R630** server at `sno.frntdeu1.pop.starlinkisp.net`. It uses the OpenShift agent-based installer, with iDRAC (Dell BMC) for virtual media and boot control.
 
 ## Table of Contents
-- [ABI `master-0` deployment](#abi-master-0-deployment)
-  - [Table of Contents](#table-of-contents)
-  - [How to install](#how-to-install)
-    - [Obtaining the `openshift-install` cli:](#obtaining-the-openshift-install-cli)
-    - [Obtaining the `agent.x86_64.iso` :](#obtaining-the-agentx86_64iso-)
-    - [Upload the `agent.x86_64.iso` to the AirGapped webcache:](#upload-the-agentx86_64iso-to-the-airgapped-webcache)
-    - [Mount the image to the server BMC:](#mount-the-image-to-the-server-bmc)
-    - [Monitoring the installation process:](#monitoring-the-installation-process)
-  - [Patching all the installplans](#patching-all-the-installplans)
-  - [Installing the Hub Specific Operators on the `isolated` cores](#installing-the-hub-specific-operators-on-the-isolated-cores)
-  - [Use Cases](#use-cases)
-- [README.md Checklist](#readmemd-checklist)
-  - [1. Project Overview](#1-project-overview)
-  - [2. Architecture \& Components](#2-architecture--components)
-  - [3. Installation \& Setup](#3-installation--setup)
-  - [4. Usage](#4-usage)
-  - [5. Performance \& Scaling](#5-performance--scaling)
-  - [6. Testing \& Validation](#6-testing--validation)
-  - [7. Troubleshooting](#7-troubleshooting)
-  - [8. Contribution Guidelines](#8-contribution-guidelines)
-  - [9. Licensing \& References](#9-licensing--references)
 
+- [Overview](#overview)
+- [Repository structure](#repository-structure)
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Installation workflow](#installation-workflow)
+- [Post-install](#post-install)
+- [Testing](#testing)
+- [CI/CD](#cicd)
+- [Use cases](#use-cases)
 
-## How to install
+## Overview
 
-Ensure that the [`agent-config.yaml`](./abi-master-0/agent-config.yaml) and [`install-config.yaml`](./abi-master-0/install-config.yaml) are allign with the environment.
+- **Target hardware**: Dell PowerEdge R630 (iDRAC for out-of-band management).
+- **Deployment**: Air-gapped SNO via the agent-based installer; ISO is built locally, served over HTTP to the BMC, and the node boots from virtual CD.
+- **Automation**: A single Python CLI (`idrac_sushy.py`) drives the full flow: preflight, config templating, ISO build, SCP to webcache host, iDRAC virtual media and boot, and `wait-for install-complete`. iDRAC is accessed via Redfish using the [sushy](https://github.com/openstack/sushy) and [sushy-oem-idrac](https://github.com/openstack/sushy-oem-idrac) libraries.
 
+## Repository structure
 
-Note, ensure that [`install-config.yaml`](./abi-master-0/install-config.yaml) has the updated [`pull-secret`](https://console.redhat.com/openshift/install/pull-secret) and the `ssh-key`.
+| Path | Purpose |
+|------|---------|
+| `idrac_sushy.py` | Main CLI: full install workflow and iDRAC operations (Redfish/sushy). |
+| `test_idrac_sushy.py` | Pytest-based tests for the installer. |
+| `Makefile` | Targets for `deps`, `install`, per-step commands, iDRAC ops, and tests. |
+| `requirements.txt` | Python dependencies (sushy, pytest, etc.). |
+| `abi-master-0/install-config.yaml` | OpenShift install config template (pull secret and SSH key are templated at run time). |
+| `abi-master-0/agent-config.yaml` | Agent installer config (network, disk hints, NTP). |
+| `abi-master-0/openshift/` | Extra manifests (e.g. PAO) applied at install time. |
+| `abi-master-0/extra-manifests/` | Day-2 operator install and config manifests. |
+| `.github/workflows/install.yml` | Optional CI: `workflow_dispatch` to run a full SNO install. |
+| `workdir/` | Generated artifacts (ISO, kubeconfig, auth) — gitignored. |
+| `.venv/` | Python virtual environment created by `make deps` — gitignored. |
 
+## Prerequisites
 
-### Obtaining the `openshift-install` cli: 
+- **oc** (OpenShift CLI) in PATH.
+- **nmstate** (for `nmstatectl`) to validate `agent-config.yaml` network config — installed by preflight on supported OS, or via `pip install nmstate` when the system package is not available (e.g. Debian/Ubuntu without the package in repos).
+- **sshpass** — for non-interactive SSH key copy to the webcache host; installed by preflight when possible.
+- **openssl** — for optional decryption of `idrac_pw.enc`.
+- **iDRAC credentials** — set `IDRAC_PW` (and optionally `IDRAC_IP`, `IDRAC_USER`) or use an encrypted password file.
+
+Python dependencies (sushy, sushy-oem-idrac, pytest, flake8) are installed by `make deps`, which creates a `.venv` and installs into it to avoid system Python conflicts (e.g. externally-managed-environment on Debian/Ubuntu).
+
+## Quick start
 
 ```bash
-oc adm release extract -a /home/midu/.docker/config.json --command=openshift-install quay.io/openshift-release-dev/ocp-release@sha256:6a653700eaae84e648f428c009de6aa6c9a3196600554947886083cf5280ed07
+# Create venv and install Python deps
+make deps
+
+# Set iDRAC password (or use idrac_pw.enc and passphrase when prompted)
+export IDRAC_PW='your-idrac-password'
+
+# Run full SNO install (default OCP version is defined in idrac_sushy.py)
+make install
+
+# Or specify an OpenShift version
+make install OCP_VERSION=4.19.23
 ```
 
-Note, replace the `quay.io/openshift-release-dev/ocp-release@sha256:6a653700eaae84e648f428c009de6aa6c9a31966005549` with the Openshift4 version desired, by obtaining the `sha256` from https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp/4.16.24/release.txt . In this tutorial situation, we are going to install the Openshift 4.16.24 version.
+The install workflow: preflight → ensure SSH key → extract `openshift-install` → prepare configs → build agent ISO → copy ISO to webcache host → iDRAC deploy (eject, insert, set boot to VirtualCD, restart, wait for power on) → wait for install-complete.
 
-### Obtaining the `agent.x86_64.iso` :
+## Configuration
 
-```bash
-./openshift-install agent create image --dir ./workdir/ --log-level debug
-```
+- **Install config**: Edit `abi-master-0/install-config.yaml` for base domain, cluster name, and networking. `pullSecret` and `sshKey` are filled at run time from `~/.docker/config.json` and `~/.ssh/id_ed25519.pub`.
+- **Agent config**: Edit `abi-master-0/agent-config.yaml` for rendezvous IP, hostname, root device hints, NIC/MAC, and nmstate `networkConfig`. Ensure NTP and network settings match the PowerEdge R630 environment (e.g. `192.168.1.133`, `eno1np0`).
+- **iDRAC**: Default IP `192.168.1.228`; override with `IDRAC_IP`, `IDRAC_USER`, and `IDRAC_PW` (env or `--ip` / `--user` / `--password` in the script).
 
-### Upload the `agent.x86_64.iso` to the AirGapped webcache:
+Default environment values (node IP, webcache host, ISO URL, NIC, disk) are defined in `idrac_sushy.py` and can be overridden via CLI or env where supported.
 
-```bash
-scp -r $(pwd)/workdir/agent.x86_64.iso rock@192.168.1.21:/apps/webcache/OSs/
-```
-or use the [go-webcache](./go-webcache/README.md) from your workingstation and expose the `agent.x86_64.iso` file to the server BMC.
+## Installation workflow
 
-### Mount the image to the server BMC:
+| Step | Make target | Description |
+|------|-------------|-------------|
+| 1 | `make preflight` | Check/install sushy, nmstatectl, sshpass, oc, openssl. |
+| 2 | `make ssh-key` | Generate SSH key if missing; copy to webcache host. |
+| 3 | `make extract-installer` | Extract `openshift-install` from OCP release. |
+| 4 | `make prepare-configs` | Prepare `workdir` with templated configs. |
+| 5 | `make build-iso` | Build agent ISO. |
+| 6 | `make copy-iso` | SCP ISO to webcache host. |
+| 7 | `make deploy ISO_URL=...` | iDRAC: eject → insert → set-boot-cd → restart → wait-power-on. |
+| 8 | `make wait-install` | Run `openshift-install agent wait-for install-complete`. |
 
-### Monitoring the installation process:
+Individual iDRAC operations: `make status`, `make eject`, `make set-boot-cd`, `make set-boot-hdd`, `make restart`, `make power-on`, `make power-off`, `make wait-power-on`.
+
+## Post-install
 
 ```bash
 export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
-./openshift-install agent wait-for install-complete --dir ./workdir/
-```
 
-Note, Once the installation its done, proceed by installing the day2-operators and configure it.
-
-## Patching all the installplans
-
-Once the SNO its available, install the `day2-operators`:
-```bash
+# Install Day-2 operators
 oc create -f ./abi-master-0/extra-manifests/operator-install/
+
+# Approve pending install plans
+oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' \
+  | xargs -n2 sh -c 'oc patch installplan $1 -n $0 --type merge -p "{\"spec\": {\"approved\": true}}"'
 ```
 
-Once the `day2-operators` are pending for Manual approval so the installation starts:
+Hub-specific operators and isolated cores are configured via manifests under `abi-master-0/openshift/` (e.g. [pao.yaml](./abi-master-0/openshift/pao.yaml)) and `abi-master-0/extra-manifests/`.
+
+## Testing
 
 ```bash
-oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' \
-| xargs -n2 sh -c 'oc patch installplan $1 -n $0 --type merge -p "{\"spec\": {\"approved\": true}}"' 
+make test          # Run pytest
+make test-verbose  # Pytest with stdout visible
+make test-coverage # Pytest with coverage report
+make lint          # flake8 on idrac_sushy.py and test_idrac_sushy.py
 ```
 
-## Installing the Hub Specific Operators on the `isolated` cores
+## CI/CD
 
-As configured on the [pao.yaml](./abi-master-0/openshift/pao.yaml) we are still having at least 44 cores available for the `workload`.
+The workflow [.github/workflows/install.yml](./.github/workflows/install.yml) provides a manual trigger (`workflow_dispatch`) to run a full SNO install on a self-hosted runner. It uses secrets for `IDRAC_PW` and an input for the OpenShift version. The job checks out the repo, runs `make deps`, installs system prerequisites (nmstate, sshpass) with a pip fallback for nmstate when the system package is unavailable, then runs `make install` with `PATH` including `.venv/bin` so `nmstatectl` from pip is found.
 
+## Use cases
 
-## Use Cases
+This project is used to:
 
-This project exists to **simplify and standardize the deployment of an air-gapped Single Node OpenShift (SNO) cluster** in the `sno.frntdeu1.pop.starlinkisp.net` environment.
-
-It solves problems such as:
-
-* **Air-gapped deployment complexity** – provides a repeatable method for generating and serving installation media without internet access.
-* **Manual operator installation delays** – includes scripts to auto-approve install plans for Day-2 operators.
-* **CPU resource isolation** – ensures hub-specific operators are pinned to isolated cores, preserving compute capacity for workloads.
-* **Configuration drift** – keeps install and config files (`agent-config.yaml`, `install-config.yaml`, `pao.yaml`) aligned with environment requirements.
-* **Operational errors** – documents exact commands, environment settings, and monitoring steps to reduce trial-and-error during deployment.
-* **Lifecycle Management** – documents exact commands to follow and document specific use-cases during the `sno.frntdeu1.pop.starlinkisp.net` environment lifecycle.
-
-
-
-# README.md Checklist
-
-Use this checklist when creating or updating a project README.
-
----
-
-## 1. Project Overview
-- [x] **Project Name**: Clearly stated at the top.
-- [x] **Description**: Concise explanation of what the project does.
-- [ ] **Use Cases**: Why this project exists and problems it solves.
-- [ ] **Status**: (e.g., Alpha, Beta, Production-ready).
-
----
-
-## 2. Architecture & Components
-- [ ] **High-Level Diagram**: Optional but recommended.
-- [ ] **Key Components**: Briefly describe services, pods, or modules.
-- [ ] **Dependencies**: List core dependencies (e.g., OpenShift version, kube-burner, Loki, etc.).
----
-
-## 3. Installation & Setup
-- [ ] **Prerequisites**:
-  - [ ] Required tools (kubectl, oc, Helm, etc.)
-  - [ ] Required cluster version / OS version
-- [x] **Installation Steps**: Step-by-step instructions.
-- [ ] **Configuration**:
-  - [ ] ConfigMaps and Secrets explained
-  - [ ] Environment variables documented
-  - [ ] Example configuration provided
-
----
-
-## 4. Usage
-- [ ] **Basic Commands**: Common CLI invocations or scripts.
-- [ ] **Examples**: Realistic usage examples (YAML manifests, workload runs, etc.).
-- [ ] **Logs & Monitoring**: How to check logs, metrics, or troubleshooting info.
-
----
-
-## 5. Performance & Scaling
-- [ ] **Supported Scale**: Max tested pods/namespaces/nodes.
-- [ ] **Resource Requirements**: CPU/memory/storage/I/O requirements.
-- [ ] **Tuning Tips**: Flags, sysctl params, or cluster settings.
-- [ ] **Limitations**: Known bottlenecks or unsupported scenarios.
-
----
-
-## 6. Testing & Validation
-- [ ] **How to Run Tests**: Unit, integration, or performance tests.
-- [ ] **Validation Checklist**: (e.g., pods running, metrics collected, logs available).
-- [ ] **CI/CD Integration**: Links or instructions if automated.
-
----
-
-## 7. Troubleshooting
-- [ ] **Common Issues**: List error messages and solutions.
-- [ ] **FAQ Section**: Short Q&A for known questions.
-- [ ] **Debugging Commands**: Helpful `kubectl`, `oc`, or system commands.
-
----
-
-## 8. Contribution Guidelines
-- [ ] **How to Contribute**: PR process, coding standards, commit message format.
-- [ ] **Issue Reporting**: Where and how to report bugs.
-- [ ] **Code of Conduct**: (if applicable).
-
----
-
-## 9. Licensing & References
-- [ ] **License**: MIT, Apache 2.0, etc.
-- [ ] **Acknowledgments**: Tools, libraries, or partners (e.g., Samsung collaboration).
-- [ ] **References**: Links to docs, specs, or research.
-
----
+- **Deploy and re-deploy SNO on a Dell PowerEdge R630** in an air-gapped environment at `sno.frntdeu1.pop.starlinkisp.net`, using iDRAC for virtual media and one-time boot.
+- **Standardize configs** — keep `install-config.yaml`, `agent-config.yaml`, and extra manifests aligned with the environment.
+- **Automate Day-2 operators** — apply operator manifests and approve install plans after the cluster is up.
+- **Reduce manual steps** — single entry point (`make install` or `idrac_sushy.py install`) for the full flow from preflight to install-complete.

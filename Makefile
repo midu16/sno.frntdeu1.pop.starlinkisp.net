@@ -1,7 +1,9 @@
-PYTHON   ?= python3
 SCRIPT    = idrac_sushy.py
-PYTEST    = $(PYTHON) -m pytest
 TEST_FILE = test_idrac_sushy.py
+VENV_DIR  = .venv
+# Use venv Python when present (after make deps), else system python3
+PYTHON    = $(or $(wildcard $(VENV_DIR)/bin/python3),python3)
+PYTEST    = $(PYTHON) -m pytest
 
 export IDRAC_PW
 export IDRAC_IP
@@ -24,7 +26,7 @@ help:
 	@echo "SNO OpenShift Installer — Makefile targets"
 	@echo ""
 	@echo "  Setup"
-	@echo "    deps               Install Python dependencies (sushy, pytest)"
+	@echo "    deps               Create .venv (if needed) and install Python deps (sushy, pytest)"
 	@echo "    clean              Remove workdir, caches, openshift-install"
 	@echo ""
 	@echo "  Full workflow"
@@ -70,8 +72,22 @@ help:
 
 # ---- Setup ------------------------------------------------------------------
 
+# Create .venv if missing and install deps (avoids externally-managed-environment on Debian/Ubuntu)
 deps:
-	pip3 install sushy sushy-oem-idrac pytest pytest-cov flake8
+	@if [ ! -d "$(VENV_DIR)" ]; then \
+		echo "Creating virtual environment in $(VENV_DIR)..."; \
+		if ! python3 -m venv $(VENV_DIR) 2>/dev/null; then \
+			echo "python3-venv missing. Installing (OS detection)..."; \
+			if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y python3-venv python3-full; \
+			elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y python3-virtualenv; \
+			elif command -v yum >/dev/null 2>&1; then sudo yum install -y python3-virtualenv; \
+			else echo "ERROR: Install python3-venv (Debian/Ubuntu) or python3-virtualenv (RHEL/Fedora) and re-run make deps"; exit 1; fi; \
+			python3 -m venv $(VENV_DIR); \
+		fi; \
+	fi; \
+	$(VENV_DIR)/bin/pip install --upgrade pip; \
+	$(VENV_DIR)/bin/pip install sushy sushy-oem-idrac pytest pytest-cov flake8
+	@echo "Dependencies installed. Use: make install (or $(VENV_DIR)/bin/python3 $(SCRIPT) ...)"
 
 clean:
 	rm -rf workdir/ openshift-install __pycache__ .pytest_cache htmlcov .coverage

@@ -168,25 +168,22 @@ def ensure_nmstatectl():
     if check_command("nmstatectl"):
         print("  nmstatectl: OK")
         return True
-    os_id, os_like = "", ""
-    os_release = Path("/etc/os-release")
-    if os_release.exists():
-        for line in os_release.read_text().splitlines():
-            if line.startswith("ID="):
-                os_id = line.split("=", 1)[1].strip('"')
-            elif line.startswith("ID_LIKE="):
-                os_like = line.split("=", 1)[1].strip('"')
+    os_id, os_like = _os_id_like()
     install_cmd = None
     rpm_families = ("fedora", "rhel", "centos", "rocky", "alma", "ol")
+    deb_families = ("debian", "ubuntu")
     if os_id in rpm_families or any(f in os_like for f in rpm_families):
         install_cmd = ["dnf", "install", "-y", "nmstate"]
-    elif any(f in os_like for f in ("debian", "ubuntu")):
+    elif os_id in deb_families or any(f in os_like for f in deb_families):
         install_cmd = ["apt-get", "install", "-y", "nmstate"]
     if install_cmd is None:
         print(f"  ERROR: Cannot auto-install nmstate (ID={os_id}).", file=sys.stderr)
         return False
     if os.getuid() != 0:
         install_cmd = ["sudo"] + install_cmd
+    if "apt-get" in install_cmd:
+        update_cmd = (["sudo"] if os.getuid() != 0 else []) + ["apt-get", "update", "-qq"]
+        subprocess.run(update_cmd, capture_output=True, text=True)
     print(f"  Installing nmstate ...")
     result = subprocess.run(install_cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -199,6 +196,52 @@ def ensure_nmstatectl():
     return False
 
 
+def _os_id_like():
+    """Return (os_id, os_like) from /etc/os-release."""
+    os_id, os_like = "", ""
+    os_release = Path("/etc/os-release")
+    if os_release.exists():
+        for line in os_release.read_text().splitlines():
+            if line.startswith("ID="):
+                os_id = line.split("=", 1)[1].strip('"')
+            elif line.startswith("ID_LIKE="):
+                os_like = line.split("=", 1)[1].strip('"')
+    return os_id, os_like
+
+
+def ensure_sshpass():
+    """Install sshpass if missing (Debian/Ubuntu/RHEL/Fedora)."""
+    if check_command("sshpass"):
+        print("  sshpass: OK")
+        return True
+    os_id, os_like = _os_id_like()
+    install_cmd = None
+    rpm_families = ("fedora", "rhel", "centos", "rocky", "alma", "ol")
+    deb_families = ("debian", "ubuntu")
+    if os_id in rpm_families or any(f in os_like for f in rpm_families):
+        install_cmd = ["dnf", "install", "-y", "sshpass"]
+    elif os_id in deb_families or any(f in os_like for f in deb_families):
+        install_cmd = ["apt-get", "install", "-y", "sshpass"]
+    if install_cmd is None:
+        print("  ERROR: Cannot auto-install sshpass (install manually or use supported OS).", file=sys.stderr)
+        return False
+    if os.getuid() != 0:
+        install_cmd = ["sudo"] + install_cmd
+    if "apt-get" in install_cmd:
+        update_cmd = (["sudo"] if os.getuid() != 0 else []) + ["apt-get", "update", "-qq"]
+        subprocess.run(update_cmd, capture_output=True, text=True)
+    print("  Installing sshpass ...")
+    result = subprocess.run(install_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print("  ERROR: sshpass install failed.", file=sys.stderr)
+        return False
+    if check_command("sshpass"):
+        print("  sshpass: installed OK")
+        return True
+    print("  ERROR: sshpass still not in PATH.", file=sys.stderr)
+    return False
+
+
 def cmd_preflight(args):
     print("Checking prerequisites ...")
     ok = True
@@ -206,7 +249,9 @@ def cmd_preflight(args):
         ok = False
     if not ensure_nmstatectl():
         ok = False
-    for tool in ("oc", "sshpass", "openssl"):
+    if not ensure_sshpass():
+        ok = False
+    for tool in ("oc", "openssl"):
         if check_command(tool):
             print(f"  {tool}: OK")
         else:

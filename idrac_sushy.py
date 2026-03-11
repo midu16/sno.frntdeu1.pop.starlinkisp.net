@@ -186,6 +186,21 @@ def ensure_nmstatectl():
         subprocess.run(update_cmd, capture_output=True, text=True)
     print(f"  Installing nmstate ...")
     result = subprocess.run(install_cmd, capture_output=True, text=True)
+    if result.returncode != 0 and "apt-get" in install_cmd:
+        # On Debian/Ubuntu nmstate often not in repo; try pip (e.g. into .venv)
+        print("  apt nmstate failed, trying pip install nmstate ...")
+        pip_result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "nmstate"],
+            capture_output=True, text=True,
+        )
+        if pip_result.returncode == 0:
+            bindir = str(Path(sys.executable).resolve().parent)
+            os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
+            if check_command("nmstatectl"):
+                print("  nmstatectl: installed OK (via pip)")
+                return True
+        print("  ERROR: nmstate install failed (apt and pip).", file=sys.stderr)
+        return False
     if result.returncode != 0:
         print(f"  ERROR: nmstate install failed.", file=sys.stderr)
         return False

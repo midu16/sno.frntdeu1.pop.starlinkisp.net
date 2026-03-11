@@ -263,7 +263,8 @@ def cmd_preflight(args):
     if not ensure_sushy():
         ok = False
     if not ensure_nmstatectl():
-        ok = False
+        print("  WARNING: nmstatectl unavailable (optional — openshift-install bundles its own validation)")
+
     if not ensure_sshpass():
         ok = False
     for tool in ("oc", "openssl"):

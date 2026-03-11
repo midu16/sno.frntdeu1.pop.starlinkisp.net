@@ -19,31 +19,6 @@ jobs:
       - name: Install Python dependencies
         run: make deps
 
-      - name: Install system prerequisites (nmstate, sshpass)
-        run: |
-          install_sshpass() {
-            if command -v apt-get >/dev/null 2>&1; then
-              sudo apt-get update -qq
-              sudo apt-get install -y sshpass
-            elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y sshpass
-            elif command -v yum >/dev/null 2>&1; then sudo yum install -y sshpass
-            else echo "ERROR: Install sshpass manually"; exit 1; fi
-          }
-          install_nmstate() {
-            if command -v apt-get >/dev/null 2>&1; then
-              sudo apt-get install -y nmstate 2>/dev/null && return 0
-              echo "nmstate not in apt repo, installing via pip into .venv ..."
-              .venv/bin/pip install nmstate
-            elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y nmstate
-            elif command -v yum >/dev/null 2>&1; then sudo yum install -y nmstate
-            else
-              echo "Installing nmstate via pip into .venv ..."
-              .venv/bin/pip install nmstate
-            fi
-          }
-          install_sshpass
-          install_nmstate
-
       - name: Run SNO install
         env:
           IDRAC_PW: ${{ secrets.IDRAC_PW }}

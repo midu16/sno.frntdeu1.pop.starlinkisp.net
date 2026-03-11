@@ -1,134 +1,102 @@
 ---
 name: sno-infrastructure
-description: Generate OpenShift SNO configs, review infrastructure code, and run installations for the sno.frntdeu1.pop.starlinkisp.net environment. Use when working with install-config.yaml, agent-config.yaml, iDRAC management, Go installer code, deployment scripts, or OpenShift cluster operations.
+description: Generate OpenShift SNO configs, review infrastructure code, and run installations for the sno.frntdeu1.pop.starlinkisp.net environment. Use when working with install-config.yaml, agent-config.yaml, iDRAC management via idrac_sushy.py, Makefile targets, or OpenShift cluster operations.
 ---
 
 # SNO Infrastructure Skill
 
 ## Project Overview
 
-Air-gapped Single Node OpenShift (SNO) deployment on Dell hardware (iDRAC 8) at `sno.frntdeu1.pop.starlinkisp.net`. Two installation paths exist:
+Air-gapped Single Node OpenShift (SNO) deployment on Dell hardware (iDRAC) at `sno.frntdeu1.pop.starlinkisp.net`. The installer is a single Python CLI:
 
-- **Bash installer**: `install_openshift_sno_hub.sh` — end-to-end script
-- **Go installer**: `go-installer/` — structured Go application with CLI subcommands
+- **idrac_sushy.py** — end-to-end SNO installer and iDRAC management via Redfish (sushy + sushy-oem-idrac). Handles preflight, config templating, ISO build, SCP to webcache, virtual media, one-time boot, power, and `wait-for install-complete`.
 
 ## Key Paths
 
 | Path | Purpose |
 |------|---------|
-| `abi-master-0/install-config.yaml` | OCP install config template (has `<pull_secret>` and `<ssh_key>` placeholders) |
+| `abi-master-0/install-config.yaml` | OCP install config template (placeholders replaced at install time) |
 | `abi-master-0/agent-config.yaml` | Agent-based installer config (network, disk hints, NTP) |
 | `abi-master-0/openshift/` | Extra manifests (PAO, operators) applied at install time |
-| `install_openshift_sno_hub.sh` | Bash installer (config templating, ISO build, iDRAC boot, wait-for-complete) |
-| `go-installer/` | Go installer (`main.go`, `internal/`) with `idrac_config.yaml` |
-| `go-webcache/` | Local HTTP file server for serving ISOs to the BMC |
+| `idrac_sushy.py` | Python CLI: full installer + iDRAC via sushy (Redfish) |
+| `test_idrac_sushy.py` | Functional tests (pytest) |
+| `Makefile` | Build/run targets for install steps, iDRAC ops, tests, lint |
+| `requirements.txt` | Python deps (sushy, sushy-oem-idrac, pytest, flake8) |
+| `.github/workflows/install.yml` | CI: checkout, make deps, make install (workflow_dispatch, OCP_VERSION input) |
 | `workdir/` | Generated artifacts (ISO, kubeconfig, state) — gitignored |
 | `idrac_pw.enc` | AES-256-CBC encrypted iDRAC password — gitignored |
-| `test-apps/` | Sample workload manifests (LVM, bind mounts) |
 
 ## Generating Configs
 
 ### install-config.yaml
 
-Template lives at `abi-master-0/install-config.yaml`. Key fields:
+Template at `abi-master-0/install-config.yaml`. Key fields:
 
-```yaml
-baseDomain: frntdeu1.pop.starlinkisp.net
-metadata:
-  name: sno
-controlPlane:
-  replicas: 1
-compute:
-  - replicas: 0
-networking:
-  networkType: OVNKubernetes
-  clusterNetwork:
-    - cidr: 10.128.0.0/14
-      hostPrefix: 23
-  serviceNetwork:
-    - 172.30.0.0/16
-  machineNetwork:
-    - cidr: 192.168.1.0/24
-platform:
-  none: {}
-pullSecret: '<replaced at install time>'
-sshKey: '<replaced at install time>'
-```
+- `baseDomain`, `metadata.name`, `controlPlane.replicas: 1`, `compute[0].replicas: 0`
+- `networking`: OVNKubernetes, clusterNetwork, serviceNetwork, machineNetwork
+- `platform.none: {}`
+- `pullSecret` and `sshKey` are templated at install time from `~/.docker/config.json` and `~/.ssh/id_ed25519.pub` by `idrac_sushy.py prepare-configs`
 
-When generating or modifying:
-- `pullSecret` and `sshKey` are templated from `~/.docker/config.json` and `~/.ssh/id_ed25519.pub` by the installer
-- Never commit real pull secrets or SSH keys
-- `compute.replicas` must be `0` for SNO
-- `controlPlane.replicas` must be `1` for SNO
+When modifying: never commit real pull secrets or SSH keys; keep compute 0 and controlPlane 1 for SNO.
 
 ### agent-config.yaml
 
 Template at `abi-master-0/agent-config.yaml`. Key fields:
 
-```yaml
-rendezvousIP: 192.168.1.133
-hosts:
-  - hostname: master-0
-    role: master
-    rootDeviceHints:
-      deviceName: "/dev/disk/by-path/pci-0000:02:00.0-scsi-0:0:0:0"
-    interfaces:
-      - name: eno1np0
-        macAddress: "84:16:0c:2a:83:fe"
-    networkConfig:
-      interfaces:
-        - name: eno1np0
-          type: ethernet
-          state: up
-          ipv4:
-            address:
-              - ip: 192.168.1.133
-                prefix-length: 24
-            dhcp: false
-      dns-resolver:
-        config:
-          server:
-            - 192.168.1.1
-      routes:
-        config:
-          - destination: 0.0.0.0/0
-            next-hop-address: 192.168.1.1
-```
+- `rendezvousIP` — must match the host’s static IP
+- `hosts[0].rootDeviceHints.deviceName` — target disk by-path
+- `hosts[0].interfaces` / `networkConfig` — nmstate format; requires `nmstatectl` on the build host
+- `additionalNTPSources` — reachable NTP server(s)
 
-When generating or modifying:
-- `rendezvousIP` must match the host's static IP
-- `rootDeviceHints.deviceName` must match the target disk by-path
-- `macAddress` must match the physical NIC
-- `networkConfig` uses nmstate format (requires `nmstatectl` on the build host)
-- NTP source (`additionalNTPSources`) should point to a reachable time server
+Keep `machineNetwork`, `rendezvousIP`, and `networkConfig` IPs consistent.
 
-## Reviewing Infrastructure Code
+## idrac_sushy.py — Implementation Summary
 
-### Bash Script Review Checklist
+- **Lazy sushy import** — non-iDRAC subcommands run without sushy installed.
+- **Libraries**: `sushy`, `sushy-oem-idrac` (Redfish + Dell OEM for VirtualCD boot).
+- **Credentials**: `--ip`, `--user`, `--password` or env `IDRAC_IP`, `IDRAC_USER`, `IDRAC_PW`; password can also come from decrypting `idrac_pw.enc` (pbkdf2 then legacy OpenSSL).
+- **Errors**: `InstallerError` for all failures; caught in `main()`.
+- **External tools**: subprocess for `oc`, `openshift-install`, `scp`, `ssh-keygen`, `openssl`. No racadm, curl, or jq.
+- **ISO URL**: must be HTTP (BMC fetches over HTTP). Default: `http://<remote_host>:8080/OSs/agent.x86_64.iso`.
 
-When reviewing `install_openshift_sno_hub.sh`:
-- Uses `set -euo pipefail` — verify no unset variable references
-- iDRAC password sourced from `IDRAC_PW` env or decrypted `idrac_pw.enc`
-- All `curl` calls to iDRAC use `-sk` (insecure TLS for BMC)
-- Redfish endpoints target iDRAC 8 paths (`/redfish/v1/...`)
-- ISO URL must be HTTP (not HTTPS) — BMC fetches over plain HTTP
-- `racadm` fallback logic handles system-installed vs local binary
+### Subcommands
 
-### Go Installer Review Checklist
+| Command | Description |
+|--------|-------------|
+| `preflight` | Check/install sushy, nmstatectl, oc, sshpass, openssl |
+| `ensure-ssh-key` | Generate SSH key if missing; ssh-copy-id to webcache host |
+| `extract-installer` | Extract `openshift-install` from OCP release image |
+| `prepare-configs` | Clean workdir; copy and template install-config + agent-config |
+| `build-iso` | `openshift-install agent create image` |
+| `copy-iso` | SCP ISO to webcache host |
+| `status` | System model, power state, virtual media info |
+| `eject` | Eject virtual media from VirtualCD |
+| `insert <iso_url>` | Insert ISO via HTTP URL into VirtualCD |
+| `set-boot-cd` | One-time boot to VirtualCD (Dell OEM) |
+| `set-boot-hdd` | One-time boot to HDD |
+| `restart` | Force-restart server |
+| `power-on` / `power-off` | Power control |
+| `wait-power-on` | Poll until power state is On |
+| `deploy <iso_url>` | eject → insert → set-boot-cd → restart → wait-power-on |
+| `wait-install` | `openshift-install agent wait-for install-complete` |
+| `install` | Full workflow: preflight → ensure-ssh-key → extract-installer → prepare-configs → build-iso → copy-iso → deploy (default ISO URL) → wait-install |
 
-When reviewing `go-installer/`:
-- Config loaded from `idrac_config.yaml` (gitignored — contains credentials)
-- Entry point: `main.go` → `internal/app`, `internal/config`, `internal/logger`
-- CLI subcommands: `install`, `config`, `power-on`, `power-off`, `restart`, `status`, `info`, `eject-media`, `insert-media`, `set-boot-cd`, `set-boot-hdd`, `cleanup`
-- Build: `cd go-installer && go build -o openshift-sno-hub-installer main.go`
-- Uses Redfish API — same iDRAC 8 endpoints as the bash script
+### Flags
 
-### YAML / Manifest Review
+- `--ip`, `--user`, `--password` — iDRAC
+- `--ocp-version` — OCP version (default in script)
+- `--iso-url` — for `install` (default: http://remote_host:8080/OSs/agent.x86_64.iso)
+- `--workdir`, `--src-dir`, `--remote-host`, etc. — see `idrac_sushy.py --help`
 
-- Validate YAML syntax before committing
-- Ensure no secrets are hardcoded (pull secrets, passwords, SSH keys)
-- Cross-check `machineNetwork.cidr`, `rendezvousIP`, and `networkConfig` IP consistency
-- Verify `rootDeviceHints` matches actual hardware
+## Makefile Targets
+
+- **Setup**: `deps` (pip install sushy, pytest, flake8), `clean` (workdir, openshift-install, caches)
+- **Full**: `install` — runs `idrac_sushy.py install`; use `OCP_VERSION=4.18.6` as needed
+- **Steps**: `preflight`, `ssh-key`, `extract-installer`, `prepare-configs`, `build-iso`, `copy-iso`, `deploy` (requires `ISO_URL=`), `wait-install`
+- **iDRAC**: `status`, `eject`, `set-boot-cd`, `set-boot-hdd`, `restart`, `power-on`, `power-off`, `wait-power-on`
+- **Testing**: `test`, `test-verbose`, `test-coverage`, `lint`
+
+Environment: `IDRAC_PW`, `IDRAC_IP`, `IDRAC_USER`; Make passes them to the script. Example: `make install IDRAC_PW='pass' OCP_VERSION=4.18.6`.
 
 ## Running Installs
 
@@ -136,48 +104,51 @@ When reviewing `go-installer/`:
 
 | Tool | Purpose |
 |------|---------|
-| `oc` | OpenShift CLI — extract installer, manage cluster |
-| `nmstatectl` | Validate nmstate network config in agent-config |
-| `sshpass` | Non-interactive SSH key copy |
-| `jq` | Parse JSON from iDRAC API |
-| `racadm` / `idracadm7` | Dell iDRAC CLI for boot config (optional fallback) |
-| `openssl` | Decrypt `idrac_pw.enc` |
+| `oc` | Extract installer, cluster operations |
+| `nmstatectl` | Validate agent-config networkConfig (installed by preflight on supported OS) |
+| `sshpass` | Non-interactive SSH key copy to webcache host |
+| `pytest` | `make test` |
+| `sushy`, `sushy-oem-idrac` | Redfish iDRAC (pip / `make deps`) |
+| `openssl` | Decrypt `idrac_pw.enc` when not using `IDRAC_PW` |
 
-### Bash Installer Workflow
+### Workflow
 
 ```bash
-# Set iDRAC password (or let script prompt for encrypted file passphrase)
-export IDRAC_PW='<password>'
+export IDRAC_PW='<password>'   # or use idrac_pw.enc passphrase when prompted
 
-# Run full install
-./install_openshift_sno_hub.sh
+make install
+# or with version:
+make install OCP_VERSION=4.18.6
 ```
 
-Steps performed:
-1. Ensure `nmstatectl` is installed
-2. Generate/copy SSH key to remote webcache host
-3. Extract `openshift-install` from OCP release
-4. Template `install-config.yaml` with pull secret and SSH key
-5. Copy configs to `workdir/`
-6. Build agent ISO (`openshift-install agent create image`)
-7. SCP ISO to webcache host
-8. iDRAC: eject existing media, mount ISO via HTTP URL
-9. Set boot to VirtualCD via racadm
-10. Power cycle server
-11. Wait for install-complete
-
-### Go Installer Workflow
+Individual steps:
 
 ```bash
-cd go-installer
+make preflight
+make prepare-configs
+make build-iso
+make copy-iso
+make deploy ISO_URL=http://192.168.1.21:8080/OSs/agent.x86_64.iso
+make wait-install
+```
 
-# Generate default config
-./openshift-sno-hub-installer config
+Direct Python:
 
-# Edit idrac_config.yaml with correct values
+```bash
+python3 idrac_sushy.py status
+python3 idrac_sushy.py insert http://192.168.1.21:8080/OSs/agent.x86_64.iso
+python3 idrac_sushy.py set-boot-cd
+python3 idrac_sushy.py deploy http://192.168.1.21:8080/OSs/agent.x86_64.iso
+python3 idrac_sushy.py --ip 10.0.0.1 --ocp-version 4.17.0 install
+```
 
-# Run full install
-./openshift-sno-hub-installer install
+### Testing
+
+```bash
+make test
+make test-verbose
+make test-coverage
+make lint
 ```
 
 ### Post-Install
@@ -185,7 +156,7 @@ cd go-installer
 ```bash
 export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
 
-# Approve pending install plans for Day-2 operators
+# Approve pending install plans (Day-2 operators)
 oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' \
   | xargs -n2 sh -c 'oc patch installplan $1 -n $0 --type merge -p "{\"spec\": {\"approved\": true}}"'
 ```
@@ -199,15 +170,13 @@ oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.me
 | Node IP | `192.168.1.133` |
 | iDRAC IP | `192.168.1.228` |
 | Webcache host | `192.168.1.21` (user: `rock`) |
-| ISO serve URL | `http://192.168.1.21:8080/OSs/agent.x86_64.iso` |
+| ISO URL | `http://192.168.1.21:8080/OSs/agent.x86_64.iso` |
 | Gateway / DNS | `192.168.1.1` |
-| NTP source | `192.168.1.21` |
+| NTP | `192.168.1.21` |
 | NIC | `eno1np0` / `84:16:0c:2a:83:fe` |
 | Disk | `/dev/disk/by-path/pci-0000:02:00.0-scsi-0:0:0:0` |
 
 ## Security Reminders
 
-- Never commit `idrac_pw.enc`, `idrac_config.yaml`, pull secrets, SSH private keys, or `workdir/auth/`
-- The `.gitignore` already covers these — verify before staging
-- iDRAC credentials should be rotated after initial deployment
-- Pull secrets expire — refresh from [console.redhat.com](https://console.redhat.com/openshift/install/pull-secret)
+- Do not commit `idrac_pw.enc`, pull secrets, SSH private keys, or `workdir/auth/`. `.gitignore` covers these.
+- Rotate iDRAC credentials after deployment. Refresh pull secrets from [console.redhat.com](https://console.redhat.com/openshift/install/pull-secret).

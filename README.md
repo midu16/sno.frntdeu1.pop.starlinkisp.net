@@ -2,6 +2,8 @@
 
 This repository automates the deployment of an **air-gapped Single Node OpenShift (SNO) cluster** on a **Dell PowerEdge R630** server at `sno.frntdeu1.pop.starlinkisp.net`. It uses the OpenShift agent-based installer, with iDRAC (Dell BMC) for virtual media and boot control.
 
+[![SNO OpenShift Install](https://github.com/midu16/sno.frntdeu1.pop.starlinkisp.net/actions/workflows/install.yml/badge.svg)](https://github.com/midu16/sno.frntdeu1.pop.starlinkisp.net/actions/workflows/install.yml)
+
 ## Table of Contents
 
 - [Overview](#overview)

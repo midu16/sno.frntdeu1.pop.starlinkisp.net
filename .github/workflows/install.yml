@@ -20,8 +20,13 @@ jobs:
         run: make deps
 
       - name: Run SNO install
-        env:
-          IDRAC_PW: ${{ secrets.IDRAC_PW }}
-          IDRAC_IP: "192.168.1.228"
-          IDRAC_USER: "root"
-        run: export PATH="$PWD/.venv/bin:$PATH" && make install OCP_VERSION=${{ inputs.ocp_version }}
+        run: export PATH="$PWD/.venv/bin:$PATH" && make install OCP_VERSION="${{ inputs.ocp_version }}" IDRAC_IP="192.168.1.228" IDRAC_USER="root" IDRAC_PW="${{ secrets.IDRAC_PW }}"
+
+      - name: Upload auth artifact for kubeadmin-minio
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth
+          path: |
+            workdir/auth/kubeadmin-password
+            workdir/auth/kubeconfig
+          retention-days: 1

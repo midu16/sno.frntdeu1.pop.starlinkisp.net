@@ -9,6 +9,13 @@ on:
         default: "4.22.0-ec.3"
         type: string
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  KUBECONFIG_PATH: ${{ github.workspace }}/workdir/auth/kubeconfig
+
 jobs:
   install:
     runs-on: self-hosted
@@ -22,8 +29,36 @@ jobs:
       - name: Run SNO install
         run: export PATH="$PWD/.venv/bin:$PATH" && make install OCP_VERSION="${{ inputs.ocp_version }}" IDRAC_IP="192.168.1.228" IDRAC_USER="root" IDRAC_PW="${{ secrets.IDRAC_PW }}"
 
-      - name: Upload auth artifact for kubeadmin-minio
-        uses: actions/upload-artifact@v4
+      - name: ⏱️ Wait for Cluster Operators
+        run: oc --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available clusteroperators --all --timeout=1800s
+
+      - name: Apply operator-install manifests
+        run: oc create --kubeconfig="${KUBECONFIG_PATH}" -f abi-master-0/extra-manifests/operator-install/
+
+      - name: 🚨 Validate no degraded operators
+        run: |
+          degraded=$(sudo oc --kubeconfig="${KUBECONFIG_PATH}" get clusteroperators -o json | jq -r '.items[] | select(.status.conditions[] | select(.type=="Degraded" and .status=="True")) | .metadata.name')
+          if [[ -n "$degraded" ]]; then
+            echo "❌ Degraded operators detected: $degraded"
+            exit 1
+          fi
+          echo "✅ No degraded Operators"
+
+      - name: "✅ Approve all InstallPlans"
+        run: |
+            oc --kubeconfig="${KUBECONFIG_PATH}" get installplan -A -o json | \
+              jq -r '.items[] | select(.spec.approved != true) | "\(.metadata.namespace) \(.metadata.name)"' | \
+              while read -r ns name; do
+                echo "Approving InstallPlan $name in namespace $ns"
+                oc --kubeconfig="${KUBECONFIG_PATH}" -n "$ns" patch installplan "$name" --type merge -p '{"spec":{"approved":true}}'
+              done
+            echo "✅ InstallPlan approval complete"
+
+      - name: Apply operator-config manifests
+        run: oc create --kubeconfig="${KUBECONFIG_PATH}" -f abi-master-0/extra-manifests/operator-config/
+         
+      - name: Upload auth artifact for kubeconfig
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: auth
           path: |

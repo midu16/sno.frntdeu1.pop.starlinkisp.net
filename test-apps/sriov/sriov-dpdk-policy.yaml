@@ -1,0 +1,20 @@
+# SriovNetworkNodePolicy for DPDK (vfio-pci) on the same PF as netdevice.
+# Uses VF range 30-49 so it does not overlap with netdevice (0-29) from
+# abi-master-0/extra-manifests/operator-config/sriov-config-netdevice-eno2np1.yaml
+---
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: sriov-config-dpdk-eno2np1
+  namespace: openshift-sriov-network-operator
+spec:
+  deviceType: vfio-pci
+  mtu: 1500
+  nicSelector:
+    pfNames:
+    - eno2np1#30-49
+  nodeSelector:
+    feature.node.kubernetes.io/network-sriov.capable: "true"
+  numVfs: 50
+  priority: 40
+  resourceName: sriov_dpdk_eno2np1

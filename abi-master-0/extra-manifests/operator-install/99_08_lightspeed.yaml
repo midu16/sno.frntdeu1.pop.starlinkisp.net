@@ -1,0 +1,43 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    workload.openshift.io/allowed: management
+  labels:
+    kubernetes.io/metadata.name: openshift-lightspeed
+    openshift.io/cluster-monitoring: "true"
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    security.openshift.io/scc.podSecurityLabelSync: "true"
+  name: openshift-lightspeed
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  annotations:
+    olm.providedAPIs: OLSConfig.v1alpha1.ols.openshift.io
+  generateName: openshift-lightspeed
+  name: openshift-lightspeed
+  namespace: openshift-lightspeed
+spec:
+  targetNamespaces:
+  - openshift-lightspeed
+  upgradeStrategy: Default
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    operators.coreos.com/lightspeed-operator.openshift-lightspeed: ""
+  name: lightspeed-operator
+  namespace: openshift-lightspeed
+spec:
+  channel: stable
+  installPlanApproval: Manual
+  name: lightspeed-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

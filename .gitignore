@@ -32,7 +32,6 @@ idrac_pw.enc
 
 # Work directories
 workdir/
-abi-master-0/
 bin/
 
 # SSH keys

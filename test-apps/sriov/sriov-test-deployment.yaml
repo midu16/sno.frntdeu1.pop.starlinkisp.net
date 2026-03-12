@@ -1,0 +1,66 @@
+# Deployment: pods get one netdev (kernel) and one DPDK (vfio) SRIOV interface.
+# Apply after: sriov-dpdk-policy.yaml, sriov-networks.yaml (and cluster must have
+# sriov-config-netdevice-eno2np1 policy from abi-master-0).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sriov-test
+  namespace: sriov-test-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sriov-test
+  template:
+    metadata:
+      labels:
+        app: sriov-test
+      annotations:
+        # Attach both SRIOV networks (netdev and DPDK).
+        k8s.v1.cni.cncf.io/networks: sriov-netdevice-eno2np1, sriov-dpdk-eno2np1
+    spec:
+      nodeSelector:
+        feature.node.kubernetes.io/network-sriov.capable: "true"
+      containers:
+        - name: sriov-test
+          image: registry.access.redhat.com/ubi9/ubi-minimal
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Netdev interfaces (kernel):"
+              ip -br link show type bridge 2>/dev/null || true
+              ip -br addr show 2>/dev/null || true
+              echo "Sleeping (DPDK VF is available as VFIO device for userspace)."
+              sleep infinity
+          resources:
+            limits:
+              openshift.io/sriov_netdevice_eno2np1: "1"
+              openshift.io/sriov_dpdk_eno2np1: "1"
+              hugepages-1Gi: "1Gi"
+            requests:
+              openshift.io/sriov_netdevice_eno2np1: "1"
+              openshift.io/sriov_dpdk_eno2np1: "1"
+              memory: "256Mi"
+              hugepages-1Gi: "1Gi"
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN", "NET_RAW", "IPC_LOCK"]
+          volumeMounts:
+            - name: hugepage
+              mountPath: /dev/hugepages
+      volumes:
+        - name: hugepage
+          emptyDir:
+            medium: HugePages
+      # 1Gi hugepages required for DPDK use of the VFIO device (node must have hugepages-1Gi configured).
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: sriov-test
+                topologyKey: kubernetes.io/hostname

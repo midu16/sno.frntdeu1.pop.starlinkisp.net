@@ -1,0 +1,15 @@
+# Apply in order: oc apply -k test-apps/sriov/
+# After apply, grant privileged SCC: oc adm policy add-scc-to-user privileged -z default -n sriov-test-ns
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  # 1. Namespace first (required for SriovNetworks and Deployment)
+  - namespace.yaml
+  # 2. Node label so master-0 matches policy nodeSelector and pod nodeSelector
+  - node-label-master-0.yaml
+  # 3. DPDK policy (netdevice policy must exist elsewhere, e.g. abi-master-0)
+  - sriov-dpdk-policy.yaml
+  # 4. SriovNetworks (create NADs in sriov-test-ns)
+  - sriov-networks.yaml
+  # 5. Deployment (pods with netdev + DPDK interfaces)
+  - sriov-test-deployment.yaml

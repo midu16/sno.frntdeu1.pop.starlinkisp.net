@@ -1,0 +1,10 @@
+# Adds the SRIOV capability label to master-0 so the node matches
+# SriovNetworkNodePolicy nodeSelector and the sriov-test pod nodeSelector.
+# Apply with: oc apply -f node-label-master-0.yaml
+# Or via kustomize: oc apply -k .
+apiVersion: v1
+kind: Node
+metadata:
+  name: master-0
+  labels:
+    feature.node.kubernetes.io/network-sriov.capable: "true"

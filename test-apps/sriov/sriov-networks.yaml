@@ -1,0 +1,31 @@
+# SriovNetwork for kernel netdevice (references existing policy sriov-config-netdevice-eno2np1).
+# Creates a NetworkAttachmentDefinition so pods get a netdev interface (e.g. net1).
+---
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetwork
+metadata:
+  name: sriov-netdevice-eno2np1
+  namespace: sriov-test-ns
+spec:
+  resourceName: sriov_netdevice_eno2np1
+  ipam: |
+    {
+      "type": "host-local",
+      "subnet": "10.100.0.0/24",
+      "rangeStart": "10.100.0.10",
+      "rangeEnd": "10.100.0.200"
+    }
+  mtu: 9000
+  spoofChk: "off"
+---
+# SriovNetwork for DPDK (vfio-pci). No IPAM - DPDK uses the VF in userspace.
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetwork
+metadata:
+  name: sriov-dpdk-eno2np1
+  namespace: sriov-test-ns
+spec:
+  resourceName: sriov_dpdk_eno2np1
+  ipam: |
+    {}
+  spoofChk: "off"

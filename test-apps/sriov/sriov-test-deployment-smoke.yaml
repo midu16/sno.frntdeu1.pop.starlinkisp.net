@@ -1,0 +1,27 @@
+# Smoke-test deployment: runs on any node without SRIOV (no nodeSelector, no SRIOV
+# resources or network attachments). Use when the cluster has no SRIOV-capable nodes
+# so you can confirm namespace, SCC, and deployment flow. For real SRIOV testing
+# use sriov-test-deployment.yaml once nodes have feature.node.kubernetes.io/network-sriov.capable=true.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sriov-test-smoke
+  namespace: sriov-test-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sriov-test-smoke
+  template:
+    metadata:
+      labels:
+        app: sriov-test-smoke
+    spec:
+      containers:
+        - name: sriov-test-smoke
+          image: registry.access.redhat.com/ubi9/ubi-minimal
+          command: ["/bin/sh", "-c", "echo Smoke pod running; sleep infinity"]
+          resources:
+            requests:
+              memory: "64Mi"
+  # No nodeSelector, no SRIOV resources, no SRIOV network annotations

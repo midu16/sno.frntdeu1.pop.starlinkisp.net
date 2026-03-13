@@ -1,0 +1,15 @@
+# Grants the privileged SCC to the default service account in openshift-monitoring.
+# Equivalent to: oc adm policy add-scc-to-user privileged -z default -n openshift-monitoring
+# Required for the node-exporter-zoneinfo DaemonSet when it uses hostPID, hostPath, runAsUser=0.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-exporter-zoneinfo-privileged-scc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: openshift-monitoring

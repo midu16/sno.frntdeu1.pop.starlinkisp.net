@@ -1,5 +1,7 @@
 # Apply in order: oc apply -k test-apps/sriov/
 # After apply, grant privileged SCC: oc adm policy add-scc-to-user privileged -z default -n sriov-test-ns
+# Optional: netdevice-only (no DPDK/hugepages): oc apply -f test-apps/sriov/sriov-test-deployment-netdev-only.yaml
+# Validate VF attachment: test-apps/sriov/validate-vf-attachment.sh [netdev-only]
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

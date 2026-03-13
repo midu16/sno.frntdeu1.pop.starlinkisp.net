@@ -8,10 +8,13 @@ spec:
     reserved: "0-1,20-21"     # Reserve CPUs for platform
     balanceIsolated: false    # Disable kernel scheduler balancing
   hugepages:
-    defaultHugepagesSize: "1G"
+    # Use 2M as default so both 2Mi and 1Gi pages are available (default 1G would remove 2M).
+    defaultHugepagesSize: "2M"
     pages:
+      - size: "2M"
+        count: 256             # 512Mi allocatable as hugepages-2Mi (e.g. SR-IOV DPDK test pods)
       - size: "1G"
-        count: 30             # adjust based on workload requirements
+        count: 8                # 8Gi allocatable; 30 would exceed ~31Gi node memory
   realTimeKernel:
     enabled: false
   numa:

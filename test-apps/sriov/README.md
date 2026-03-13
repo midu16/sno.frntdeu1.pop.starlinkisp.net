@@ -45,20 +45,42 @@ From the repo root:
 | `sriov-dpdk-policy.yaml` | SriovNetworkNodePolicy for DPDK (vfio-pci), resource `sriov_dpdk_eno2np1`, VF range 30–49. |
 | `sriov-networks.yaml` | SriovNetwork for netdev (`sriov-netdevice-eno2np1`) and DPDK (`sriov-dpdk-eno2np1`) in `sriov-test-ns`. |
 | `sriov-test-deployment.yaml` | Deployment with pods that request one netdev and one DPDK VF, plus hugepages. |
+| `sriov-test-deployment-netdev-only.yaml` | Netdevice-only: one VF (kernel netdev), no DPDK, no hugepages. Use to validate VF attachment when the full deployment cannot schedule. |
 | `sriov-test-deployment-smoke.yaml` | Smoke test: runs on any node without SRIOV (no nodeSelector/resources). Use to verify namespace and SCC when no SRIOV-capable node exists. |
+| `validate-vf-attachment.sh` | Script: applies kustomize, grants SCC, waits for pod, then exec's `ip link`/`ip addr` to verify VF attachment. Optional arg `netdev-only` uses the netdevice-only deployment. |
 
-## Verifying
+## Validate VF attachment
 
-- List pods and check they have both SRIOV resources and are running:
+**One-shot apply + verify (recommended):**
+
+```bash
+# From repo root, with KUBECONFIG set
+./test-apps/sriov/validate-vf-attachment.sh
+```
+
+This applies `oc apply -k test-apps/sriov/`, grants the privileged SCC, waits for the deployment pod to be Running, then runs `ip -br link` and `ip -br addr` inside the pod to show the attached VF interface(s).
+
+If the full deployment stays **Pending** (e.g. node has no 1Gi hugepages), use the netdevice-only deployment:
+
+```bash
+./test-apps/sriov/validate-vf-attachment.sh netdev-only
+```
+
+That uses `sriov-test-deployment-netdev-only.yaml` (one netdev VF, no DPDK, no hugepages) so the pod can schedule and you can confirm VF attachment.
+
+**Manual verification:**
+
+- List pods and check they have SRIOV resources and are Running:
 
   ```bash
   oc get pods -n sriov-test-ns -o wide
   oc describe pod -n sriov-test-ns -l app=sriov-test
   ```
 
-- In a pod, check kernel netdevice (netdev):
+- In a pod, check kernel netdevice (netdev) and that a VF interface exists (e.g. `net1`):
 
   ```bash
+  oc exec -n sriov-test-ns deploy/sriov-test -- ip -br link show
   oc exec -n sriov-test-ns deploy/sriov-test -- ip -br addr show
   ```
 

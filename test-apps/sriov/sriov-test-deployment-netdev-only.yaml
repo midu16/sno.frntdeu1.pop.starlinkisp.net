@@ -1,0 +1,44 @@
+# Netdevice-only deployment: one SR-IOV VF (kernel netdev), no DPDK, no hugepages.
+# Use this to validate VF attachment when full DPDK deployment cannot schedule (e.g. no 1Gi hugepages).
+# Requires: sriov-config-netdevice-eno2np1 (abi-master-0), SriovNetwork sriov-netdevice-eno2np1 in sriov-test-ns.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sriov-test-netdev-only
+  namespace: sriov-test-ns
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sriov-test-netdev-only
+  template:
+    metadata:
+      labels:
+        app: sriov-test-netdev-only
+      annotations:
+        k8s.v1.cni.cncf.io/networks: sriov-netdevice-eno2np1
+    spec:
+      nodeSelector:
+        feature.node.kubernetes.io/network-sriov.capable: "true"
+      containers:
+        - name: sriov-test
+          image: registry.access.redhat.com/ubi9/ubi-minimal
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "=== SR-IOV netdevice interfaces ==="
+              ip -br link show
+              ip -br addr show
+              echo "=== Sleep (inspect with: oc exec -n sriov-test-ns deploy/sriov-test-netdev-only -- ip link) ==="
+              sleep infinity
+          resources:
+            limits:
+              openshift.io/sriov_netdevice_eno2np1: "1"
+            requests:
+              openshift.io/sriov_netdevice_eno2np1: "1"
+              memory: "64Mi"
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["NET_RAW"]

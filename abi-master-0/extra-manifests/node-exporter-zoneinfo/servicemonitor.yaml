@@ -1,0 +1,17 @@
+# ServiceMonitor so cluster Prometheus scrapes node-exporter-zoneinfo (job="node-exporter-zoneinfo").
+# Must be in openshift-monitoring for default cluster Prometheus to discover it.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: node-exporter-zoneinfo
+  namespace: openshift-monitoring
+  labels:
+    app.kubernetes.io/name: node-exporter-zoneinfo
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-exporter-zoneinfo
+  endpoints:
+    - port: metrics
+      interval: 30s
+  jobLabel: app.kubernetes.io/name

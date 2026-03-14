@@ -1,0 +1,43 @@
+# Order: Subscription first, then OperatorGroup, then Namespace so "oc delete -f" removes in dependency order.
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: rhods-operator
+  namespace: redhat-ods-operator
+  labels:
+    operators.coreos.com/rhods-operator.redhat-ods-operator: ""
+spec:
+  channel: stable
+  installPlanApproval: Manual
+  name: rhods-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: redhat-ods-operator
+  namespace: redhat-ods-operator
+  annotations:
+    olm.providedAPIs: Auth.v1alpha1.services.platform.opendatahub.io,CodeFlare.v1alpha1.components.platform.opendatahub.io,DSCInitialization.v1.dscinitialization.opendatahub.io,Dashboard.v1alpha1.components.platform.opendatahub.io,DataScienceCluster.v1.datasciencecluster.opendatahub.io,DataSciencePipelines.v1alpha1.components.platform.opendatahub.io,FeastOperator.v1alpha1.components.platform.opendatahub.io,FeatureTracker.v1.features.opendatahub.io,HardwareProfile.v1alpha1.infrastructure.opendatahub.io,Kserve.v1alpha1.components.platform.opendatahub.io,Kueue.v1alpha1.components.platform.opendatahub.io,LlamaStackOperator.v1alpha1.components.platform.opendatahub.io,ModelController.v1alpha1.components.platform.opendatahub.io,ModelMeshServing.v1alpha1.components.platform.opendatahub.io,ModelRegistry.v1alpha1.components.platform.opendatahub.io,Monitoring.v1alpha1.services.platform.opendatahub.io,Ray.v1alpha1.components.platform.opendatahub.io,ServiceMesh.v1alpha1.services.platform.opendatahub.io,TrainingOperator.v1alpha1.components.platform.opendatahub.io,TrustyAI.v1alpha1.components.platform.opendatahub.io,Workbenches.v1alpha1.components.platform.opendatahub.io
+# Omit targetNamespaces so the OperatorGroup watches all namespaces (AllNamespaces install mode).
+# rhods-operator does not support OwnNamespace (watching only redhat-ods-operator).
+spec:
+  upgradeStrategy: Default
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redhat-ods-operator
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    workload.openshift.io/allowed: management
+  labels:
+    kubernetes.io/metadata.name: redhat-ods-operator
+    openshift.io/cluster-monitoring: "true"
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    security.openshift.io/scc.podSecurityLabelSync: "true"

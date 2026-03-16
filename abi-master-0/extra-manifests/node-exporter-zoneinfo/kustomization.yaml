@@ -1,12 +1,16 @@
 # Supplementary node_exporter (zoneinfo, interrupts, softirqs) for cluster Prometheus.
-# Deploys into openshift-monitoring; cluster Prometheus discovers the ServiceMonitor.
-# Includes ClusterRoleBinding to grant privileged SCC to default SA (for hostPID/hostPath/runAsUser=0).
+# DaemonSet/Service/ServiceMonitor deploy into openshift-monitoring (see metadata.namespace in each file).
+# Check pods: oc get pods -n openshift-monitoring -l app.kubernetes.io/name=node-exporter-zoneinfo
+# Includes ClusterRoleBinding to grant privileged SCC to default SA (for hostPID/hostPath).
 # Usage: oc apply -k abi-master-0/extra-manifests/node-exporter-zoneinfo/
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - namespace.yaml
   - clusterrolebinding-privileged-scc.yaml
+  # Comment the daemonset.yaml and uncomment the daemonset-rootless.yaml to deploy the rootless node_exporter.
+  #or the otherway around if you want to deploy the privileged node_exporter.
   - daemonset.yaml
+  # - daemonset-rootless.yaml
   - service.yaml
   - servicemonitor.yaml

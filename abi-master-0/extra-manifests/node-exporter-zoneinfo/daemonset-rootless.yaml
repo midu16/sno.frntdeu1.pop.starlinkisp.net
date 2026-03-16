@@ -1,0 +1,63 @@
+# Supplementary node_exporter: zoneinfo, interrupts, softirqs only (port 9101).
+# Use when cluster-monitoring-config does not support these collectors.
+# Apply after install; CMO does not manage this DaemonSet.
+# Uses default SA; ClusterRoleBinding node-exporter-zoneinfo-privileged-scc grants privileged SCC.
+# To force rollout after first apply: bump node-exporter-zoneinfo/force-rollout and re-apply.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter-zoneinfo
+  namespace: node-exporter-zoneinfo
+  labels:
+    app.kubernetes.io/name: node-exporter-zoneinfo
+    app.kubernetes.io/component: exporter
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-exporter-zoneinfo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-exporter-zoneinfo
+        app.kubernetes.io/component: exporter
+      annotations:
+        node-exporter-zoneinfo/force-rollout: "1"
+    spec:
+      serviceAccountName: default
+      hostPID: true
+      tolerations:
+        - operator: Exists
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.9.1
+          args:
+            - --web.listen-address=0.0.0.0:9101
+            - --path.procfs=/host/proc
+            - --collector.disable-defaults
+            - --collector.zoneinfo
+            - --collector.interrupts
+            - --collector.softirqs
+          ports:
+            - containerPort: 9101
+              name: metrics
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+          volumeMounts:
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: ""
+      nodeSelector:
+        sriovnetwork.openshift.io/device-plugin: Enabled

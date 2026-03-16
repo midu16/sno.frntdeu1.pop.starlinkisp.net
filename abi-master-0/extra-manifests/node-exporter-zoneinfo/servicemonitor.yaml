@@ -8,6 +8,9 @@ metadata:
   labels:
     app.kubernetes.io/name: node-exporter-zoneinfo
 spec:
+  namespaceSelector:
+    matchNames:
+      - node-exporter-zoneinfo
   selector:
     matchLabels:
       app.kubernetes.io/name: node-exporter-zoneinfo

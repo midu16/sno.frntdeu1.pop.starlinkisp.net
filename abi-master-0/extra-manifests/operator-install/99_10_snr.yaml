@@ -1,0 +1,46 @@
+# Order: Subscription first, then OperatorGroup, then Namespace so "oc delete -f" removes in dependency order.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    security.openshift.io/MinimallySufficientPodSecurityStandard: privileged
+    workload.openshift.io/allowed: management
+  labels:
+    kubernetes.io/metadata.name: openshift-workload-availability
+    openshift.io/cluster-monitoring: "true"
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest
+    security.openshift.io/scc.podSecurityLabelSync: "true"
+  name: openshift-workload-availability
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: self-node-remediation
+  namespace: openshift-workload-availability
+  labels:
+    operators.coreos.com/self-node-remediation.openshift-workload-availability: ""
+spec:
+  channel: stable
+  installPlanApproval: Manual
+  name: self-node-remediation
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-workload-availability
+  namespace: openshift-workload-availability
+  annotations:
+      olm.providedAPIs: SelfNodeRemediation.v1alpha1.self-node-remediation.medik8s.io,SelfNodeRemediationConfig.v1alpha1.self-node-remediation.medik8s.io,SelfNodeRemediationTemplate.v1alpha1.self-node-remediation.medik8s.io
+# Omit targetNamespaces so the OperatorGroup watches all namespaces (AllNamespaces install mode).
+# rhods-operator does not support OwnNamespace (watching only redhat-ods-operator).
+spec:
+  upgradeStrategy: Default
+
+

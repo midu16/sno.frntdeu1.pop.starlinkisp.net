@@ -17,8 +17,10 @@ spec:
         path: /etc/crio/crio.conf.d/01-workload-partitioning
         user:
           name: root
+      # JSON is minified (single line, no leading newline) so the file bytes match MCD on-disk
+      # validation and avoid spurious pool degradation vs pretty-printed or hand-edited copies.
       - contents:
-          source: data:text/plain;charset=utf-8;base64,ewogICJtYW5hZ2VtZW50IjogewogICAgImNwdXNldCI6ICIwLTEsMjAtMjEiCiAgfQp9Cg==
+          source: data:text/plain;charset=utf-8;base64,eyJtYW5hZ2VtZW50Ijp7ImNwdXNldCI6IjAtMSwyMC0yMSJ9fQ==
         mode: 420
         overwrite: true
         path: /etc/kubernetes/openshift-workload-pinning

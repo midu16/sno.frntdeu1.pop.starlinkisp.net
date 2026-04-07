@@ -55,7 +55,7 @@ jobs:
             echo "✅ InstallPlan approval complete"
 
       - name: Apply operator-config manifests
-        run: oc create --kubeconfig="${KUBECONFIG_PATH}" -f abi-master-0/extra-manifests/operator-config/
+        run: export PATH="$PWD/.venv/bin:$PATH" && python3 scripts/apply_operator_config.py --kubeconfig="${KUBECONFIG_PATH}"
          
       - name: Upload auth artifact for kubeconfig
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

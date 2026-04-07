@@ -37,7 +37,7 @@ jobs:
 
       - name: 🚨 Validate no degraded operators
         run: |
-          degraded=$(sudo oc --kubeconfig="${KUBECONFIG_PATH}" get clusteroperators -o json | jq -r '.items[] | select(.status.conditions[] | select(.type=="Degraded" and .status=="True")) | .metadata.name')
+          degraded=$(oc --kubeconfig="${KUBECONFIG_PATH}" get clusteroperators -o json | jq -r '.items[] | select(.status.conditions[] | select(.type=="Degraded" and .status=="True")) | .metadata.name')
           if [[ -n "$degraded" ]]; then
             echo "❌ Degraded operators detected: $degraded"
             exit 1

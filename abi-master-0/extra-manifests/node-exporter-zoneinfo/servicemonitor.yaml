@@ -1,5 +1,7 @@
 # ServiceMonitor so cluster Prometheus scrapes node-exporter-zoneinfo (job="node-exporter-zoneinfo").
-# Must be in openshift-monitoring for default cluster Prometheus to discover it.
+# Lives in openshift-monitoring so cluster Prometheus discovers it; scrapes Service in node-exporter-zoneinfo.
+# Relabelings: set instance to the node hostname (same pattern as cluster node-exporter ServiceMonitor),
+# so targets show e.g. hub-ctlplane-0.hub.5g-deployment.lab instead of scrape IP:port.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -17,4 +19,11 @@ spec:
   endpoints:
     - port: metrics
       interval: 30s
+      relabelings:
+        - action: replace
+          regex: (.*)
+          replacement: $1
+          sourceLabels:
+            - __meta_kubernetes_pod_node_name
+          targetLabel: instance
   jobLabel: app.kubernetes.io/name

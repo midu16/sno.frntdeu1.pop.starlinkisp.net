@@ -2,8 +2,9 @@
 """Apply abi-master-0/extra-manifests/operator-config in a safe order.
 
 1. ConfigMaps (no CRDs).
-2. Wait for LVMS CRD, apply LVMCluster.
-3. Wait for SR-IOV CRDs, apply Sriov resources.
+2. Wait for LVMS and SR-IOV ClusterServiceVersions (phase Succeeded).
+3. Wait for LVMS CRD, apply LVMCluster.
+4. Wait for SR-IOV CRDs, apply Sriov resources.
 
 Requires ``oc`` on PATH. Set ``KUBECONFIG`` or ``KUBECONFIG_PATH`` to the cluster kubeconfig file.
 """
@@ -11,6 +12,7 @@ Requires ``oc`` on PATH. Set ``KUBECONFIG`` or ``KUBECONFIG_PATH`` to the cluste
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -84,6 +86,162 @@ def _oc_checked(args: list[str], *, kubeconfig: Path) -> None:
         raise OperatorConfigError(f"oc {' '.join(args)} failed: {err}")
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
+
+
+def _print_csv_timeout_diagnostics(namespace: str, *, kubeconfig: Path) -> None:
+    proc = _run_oc(
+        ["get", "subscription,csv,pods", "-n", namespace, "-o", "wide"],
+        kubeconfig=kubeconfig,
+        check=False,
+    )
+    print(proc.stdout.rstrip() if proc.stdout else "", flush=True)
+    if proc.stderr:
+        print(proc.stderr.rstrip(), file=sys.stderr, flush=True)
+    ev = _run_oc(
+        ["get", "events", "-n", namespace, "--sort-by=.lastTimestamp"],
+        kubeconfig=kubeconfig,
+        check=False,
+    )
+    if ev.returncode == 0 and ev.stdout:
+        lines = ev.stdout.splitlines()
+        tail = lines[-40:] if len(lines) > 40 else lines
+        print("Recent events:", flush=True)
+        for line in tail:
+            print(line, flush=True)
+
+
+def _wait_csv_succeeded(
+    namespace: str,
+    name_prefix: str,
+    description: str,
+    *,
+    kubeconfig: Path,
+    timeout_sec: int,
+    poll_sec: int,
+) -> None:
+    print(
+        f"Waiting for {description} CSV (name prefix {name_prefix}) in {namespace} "
+        f"(up to {timeout_sec}s) ...",
+        flush=True,
+    )
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        proc = _run_oc(
+            ["get", "csv", "-n", namespace, "-o", "json"],
+            kubeconfig=kubeconfig,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.strip() or str(proc.returncode)
+            print(f"  (oc get csv failed: {err})", flush=True)
+            time.sleep(poll_sec)
+            continue
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            time.sleep(poll_sec)
+            continue
+        matched = False
+        for item in data.get("items", []):
+            meta = item.get("metadata") or {}
+            name = meta.get("name")
+            if not isinstance(name, str) or not name.startswith(name_prefix):
+                continue
+            matched = True
+            status = item.get("status") or {}
+            phase = status.get("phase") or ""
+            print(f"  {name}: {phase or 'unknown'}", flush=True)
+            if phase == "Succeeded":
+                print(f"  {description} ready.", flush=True)
+                return
+            break
+        if not matched:
+            print(f"  (no CSV with prefix {name_prefix} in {namespace} yet)", flush=True)
+        time.sleep(poll_sec)
+
+    print(f"Timeout waiting for {description} CSV in {namespace}.", flush=True)
+    _print_csv_timeout_diagnostics(namespace, kubeconfig=kubeconfig)
+    raise OperatorConfigError(
+        f"Timeout waiting for {description} CSV in {namespace} after {timeout_sec}s."
+    )
+
+
+def _wait_required_operator_csvs(
+    *,
+    kubeconfig: Path,
+    csv_timeout_sec: int,
+    csv_poll_sec: int,
+) -> None:
+    targets: tuple[tuple[str, str, str], ...] = (
+        ("openshift-storage", "lvms-operator", "LVMS"),
+        (
+            "openshift-sriov-network-operator",
+            "sriov-network-operator",
+            "SR-IOV",
+        ),
+    )
+    for ns, prefix, desc in targets:
+        _wait_csv_succeeded(
+            ns,
+            prefix,
+            desc,
+            kubeconfig=kubeconfig,
+            timeout_sec=csv_timeout_sec,
+            poll_sec=csv_poll_sec,
+        )
+    print("All target operators report CSV Succeeded.", flush=True)
+
+
+def _print_crd_timeout_hints(crd_name: str, *, kubeconfig: Path) -> None:
+    """After CRD wait failure, print OLM/operator state for common cases."""
+    hints: list[tuple[str, list[str]]] = []
+    if "lvm" in crd_name.lower():
+        hints.append(
+            (
+                "openshift-storage (LVMS)",
+                [
+                    "get",
+                    "subscription,csv,pods",
+                    "-n",
+                    "openshift-storage",
+                    "-o",
+                    "wide",
+                ],
+            )
+        )
+    if "sriov" in crd_name.lower():
+        hints.append(
+            (
+                "openshift-sriov-network-operator",
+                [
+                    "get",
+                    "subscription,csv,pods",
+                    "-n",
+                    "openshift-sriov-network-operator",
+                    "-o",
+                    "wide",
+                ],
+            )
+        )
+    for title, oc_args in hints:
+        print(f"Hint — {title}:", flush=True)
+        proc = _run_oc(oc_args, kubeconfig=kubeconfig, check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            for line in proc.stdout.splitlines():
+                print(f"  {line}", flush=True)
+        else:
+            err = proc.stderr.strip() if proc.stderr else ""
+            print(f"  (oc failed: {err or proc.returncode})", flush=True)
+
+
 def _wait_crd(
     crd_name: str,
     *,
@@ -120,6 +278,7 @@ def _wait_crd(
         for line in proc.stdout.splitlines():
             if "lvm" in line.lower() or "sriov" in line.lower():
                 print(f"  {line}", flush=True)
+    _print_crd_timeout_hints(crd_name, kubeconfig=kubeconfig)
     raise OperatorConfigError(f"Timeout waiting for CRD {crd_name} after {timeout_sec}s.")
 
 
@@ -138,6 +297,8 @@ def _apply_file(path: Path, *, kubeconfig: Path) -> None:
 def apply_operator_config(
     *,
     kubeconfig: Path,
+    csv_timeout_sec: int = 1800,
+    csv_poll_sec: int = 15,
     crd_timeout_sec: int = 900,
 ) -> None:
     d = _operator_config_dir()
@@ -146,6 +307,12 @@ def apply_operator_config(
 
     _apply_file(d / "monitoring-config-cm.yaml", kubeconfig=kubeconfig)
     _apply_file(d / "supported-nic-ids.yaml", kubeconfig=kubeconfig)
+
+    _wait_required_operator_csvs(
+        kubeconfig=kubeconfig,
+        csv_timeout_sec=csv_timeout_sec,
+        csv_poll_sec=csv_poll_sec,
+    )
 
     _wait_crd(
         "lvmclusters.lvm.topolvm.io",
@@ -171,11 +338,27 @@ def apply_operator_config(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Apply operator-config manifests after operators install CRDs.",
+        description=(
+            "Apply operator-config manifests: wait for LVMS/SR-IOV CSVs, then for CRDs as needed."
+        ),
     )
     p.add_argument(
         "--kubeconfig",
         help="Path to kubeconfig (overrides KUBECONFIG / KUBECONFIG_PATH).",
+    )
+    p.add_argument(
+        "--csv-timeout",
+        type=int,
+        default=_env_int("WAIT_CSV_TIMEOUT_SEC", 1800),
+        metavar="SEC",
+        help="Seconds to wait for each operator CSV (default: 1800, or WAIT_CSV_TIMEOUT_SEC).",
+    )
+    p.add_argument(
+        "--csv-poll",
+        type=int,
+        default=_env_int("WAIT_CSV_POLL_SEC", 15),
+        metavar="SEC",
+        help="Poll interval while waiting for CSVs (default: 15, or WAIT_CSV_POLL_SEC).",
     )
     p.add_argument(
         "--crd-timeout",
@@ -188,7 +371,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         kc = _resolve_kubeconfig(args.kubeconfig)
-        apply_operator_config(kubeconfig=kc, crd_timeout_sec=args.crd_timeout)
+        apply_operator_config(
+            kubeconfig=kc,
+            csv_timeout_sec=args.csv_timeout,
+            csv_poll_sec=args.csv_poll,
+            crd_timeout_sec=args.crd_timeout,
+        )
     except OperatorConfigError as e:
         print(f"Error: {e}", file=sys.stderr, flush=True)
         return 1

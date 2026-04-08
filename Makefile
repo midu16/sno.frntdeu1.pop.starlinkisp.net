@@ -8,6 +8,8 @@ PYTEST    = $(PYTHON) -m pytest
 export IDRAC_PW
 export IDRAC_IP
 export IDRAC_USER
+# Optional: openshift-install allows ~90m per wait-for install-complete; default 2 attempts in idrac_sushy.py
+export INSTALL_WAIT_ATTEMPTS
 
 OCP_VERSION ?=
 OCP_FLAG     = $(if $(OCP_VERSION),--ocp-version $(OCP_VERSION),)

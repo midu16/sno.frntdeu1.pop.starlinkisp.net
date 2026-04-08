@@ -44,6 +44,7 @@ def default_args():
         attempts=30,
         interval=10,
         command="status",
+        install_wait_attempts=2,
     )
 
 
@@ -469,6 +470,36 @@ class TestWaitInstall:
         cmd = mock_run.call_args[0][0]
         assert "wait-for" in cmd
         assert "install-complete" in cmd
+        assert mock_run.call_count == 1
+
+    @patch.object(idrac_sushy, "run_cmd")
+    def test_wait_retries_on_failure(self, mock_run, default_args, tmp_path):
+        installer = tmp_path / "openshift-install"
+        installer.touch()
+        default_args.installer = str(installer)
+        default_args.workdir = str(tmp_path / "workdir")
+        default_args.install_wait_attempts = 2
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(6, [str(installer)]),
+            None,
+        ]
+
+        idrac_sushy.cmd_wait_install(default_args)
+        assert mock_run.call_count == 2
+
+    @patch.object(idrac_sushy, "run_cmd")
+    def test_wait_raises_after_exhausting_attempts(self, mock_run, default_args, tmp_path):
+        installer = tmp_path / "openshift-install"
+        installer.touch()
+        default_args.installer = str(installer)
+        default_args.workdir = str(tmp_path / "workdir")
+        default_args.install_wait_attempts = 2
+        err = subprocess.CalledProcessError(6, [str(installer)])
+        mock_run.side_effect = [err, err]
+
+        with pytest.raises(subprocess.CalledProcessError):
+            idrac_sushy.cmd_wait_install(default_args)
+        assert mock_run.call_count == 2
 
     def test_missing_installer_fails(self, default_args, tmp_path):
         default_args.installer = str(tmp_path / "nonexistent")

@@ -8,6 +8,11 @@ on:
         required: true
         default: "4.22.0-ec.3"
         type: string
+      install_wait_attempts:
+        description: "INSTALL_WAIT_ATTEMPTS — retries for openshift-install wait-for install-complete (~90 min each; see idrac_sushy.py)"
+        required: false
+        default: "2"
+        type: string
 
 defaults:
   run:
@@ -15,10 +20,13 @@ defaults:
 
 env:
   KUBECONFIG_PATH: ${{ github.workspace }}/workdir/auth/kubeconfig
+  INSTALL_WAIT_ATTEMPTS: ${{ inputs.install_wait_attempts }}
 
 jobs:
   install:
     runs-on: self-hosted
+    # Long installs: ISO + iDRAC + bootstrap + multiple 90m wait-for install-complete attempts
+    timeout-minutes: 720
     steps:
       - name: Checkout
         uses: actions/checkout@v6

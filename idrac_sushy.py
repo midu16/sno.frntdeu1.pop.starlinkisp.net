@@ -37,6 +37,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from subprocess import CalledProcessError
 
 SEPARATOR = "=" * 92
 
@@ -53,6 +54,15 @@ DEFAULTS = {
     "ssh_key": str(Path.home() / ".ssh" / "id_ed25519.pub"),
     "registry_auth": str(Path.home() / ".docker" / "config.json"),
 }
+
+
+def _default_install_wait_attempts():
+    """openshift-install agent wait-for install-complete allows ~90m per invocation."""
+    raw = os.environ.get("INSTALL_WAIT_ATTEMPTS", "2")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
 
 
 class InstallerError(Exception):
@@ -644,6 +654,7 @@ def cmd_deploy(args):
 def cmd_wait_install(args):
     workdir = _attr(args, "workdir")
     installer = _attr(args, "installer")
+    attempts = max(1, int(getattr(args, "install_wait_attempts", _default_install_wait_attempts())))
 
     if not Path(installer).exists():
         raise InstallerError(f"Installer not found: {installer}")
@@ -651,9 +662,21 @@ def cmd_wait_install(args):
     kubeconfig = Path(workdir) / "auth" / "kubeconfig"
     os.environ["KUBECONFIG"] = str(kubeconfig.resolve())
 
-    print("Waiting for install-complete ...")
-    run_cmd([installer, "agent", "wait-for", "install-complete", "--dir", workdir])
-    print("Installation complete!")
+    cmd = [installer, "agent", "wait-for", "install-complete", "--dir", workdir]
+    for attempt in range(1, attempts + 1):
+        print(f"Waiting for install-complete (attempt {attempt}/{attempts}) ...")
+        try:
+            run_cmd(cmd)
+            print("Installation complete!")
+            return
+        except CalledProcessError as e:
+            if attempt >= attempts:
+                raise
+            print(
+                f"Install wait exited {e.returncode} (openshift-install allows ~90m per attempt). "
+                "Cluster may still be reconciling MachineConfig; retrying ...",
+                flush=True,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -757,11 +780,29 @@ def build_parser():
     p_dep = sub.add_parser("deploy", help="iDRAC full cycle: eject -> insert -> boot-cd -> restart -> wait")
     p_dep.add_argument("iso_url", help="HTTP URL to the ISO file")
 
-    sub.add_parser("wait-install", help="Wait for openshift-install agent install-complete")
+    p_wi = sub.add_parser("wait-install", help="Wait for openshift-install agent install-complete")
+    p_wi.add_argument(
+        "--install-wait-attempts",
+        dest="install_wait_attempts",
+        type=int,
+        default=_default_install_wait_attempts(),
+        metavar="N",
+        help="Retries for openshift-install wait-for install-complete (~90m each). "
+        "Default: env INSTALL_WAIT_ATTEMPTS or 2.",
+    )
 
     p_full = sub.add_parser("install", help="Full end-to-end SNO OpenShift installation")
     p_full.add_argument("--iso-url", dest="iso_url", default=None,
                         help="ISO URL for iDRAC (default: http://<remote-host>:8080/OSs/agent.x86_64.iso)")
+    p_full.add_argument(
+        "--install-wait-attempts",
+        dest="install_wait_attempts",
+        type=int,
+        default=_default_install_wait_attempts(),
+        metavar="N",
+        help="Retries for openshift-install wait-for install-complete (~90m each). "
+        "Default: env INSTALL_WAIT_ATTEMPTS or 2.",
+    )
 
     return parser
 

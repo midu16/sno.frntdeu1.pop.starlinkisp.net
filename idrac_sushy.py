@@ -482,6 +482,24 @@ def require_cd(manager):
     return cd
 
 
+def insert_virtual_media(cd, iso_url):
+    """Mount ISO from HTTP URL on VirtualCD; raise InstallerError with Redfish details on failure."""
+    sushy = _get_sushy()
+    try:
+        cd.insert_media(iso_url)
+    except sushy.exceptions.ServerSideError as e:
+        raise InstallerError(
+            "Virtual media insert failed: iDRAC rejected the mount or could not fetch the ISO.\n"
+            f"  URL: {iso_url}\n"
+            f"  Redfish: {e}\n"
+            "  Check: iDRAC management network can reach that host:port (routing/firewall), "
+            "HTTP serves the file (curl from a host on the same net as the BMC), "
+            "and the path matches where copy-iso placed agent.x86_64.iso."
+        ) from e
+    except Exception as e:
+        raise InstallerError(f"Virtual media insert failed: {e}") from e
+
+
 def cmd_status(args):
     pw = resolve_password(args)
     _, manager, system = connect(args.ip, args.user, pw)
@@ -515,7 +533,7 @@ def cmd_insert(args):
     _, manager, _ = connect(args.ip, args.user, pw)
     cd = require_cd(manager)
     print(f"Inserting virtual media: {args.iso_url}")
-    cd.insert_media(args.iso_url)
+    insert_virtual_media(cd, args.iso_url)
     time.sleep(5)
     cd.invalidate()
     cd.refresh(force=False)
@@ -610,7 +628,7 @@ def cmd_deploy(args):
 
     # 2 — Insert
     print(f"Inserting virtual media: {iso_url}")
-    cd.insert_media(iso_url)
+    insert_virtual_media(cd, iso_url)
     time.sleep(10)
     cd.invalidate()
     cd.refresh(force=False)

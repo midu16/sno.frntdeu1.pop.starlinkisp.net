@@ -584,6 +584,16 @@ class TestIDRACInsert:
                 idrac_sushy.cmd_insert(default_args)
         mock_idrac["cd_device"].insert_media.assert_called_once_with(default_args.iso_url)
 
+    def test_insert_redfish_error(self, mock_idrac, default_args):
+        ServerSideError = mock_idrac["sushy"].exceptions.ServerSideError
+        mock_idrac["cd_device"].insert_media.side_effect = ServerSideError("Connection refused")
+        default_args.iso_url = "http://192.168.1.21:8080/OSs/agent.x86_64.iso"
+        with patch.object(idrac_sushy, "_get_sushy", return_value=mock_idrac["sushy"]):
+            with patch.object(idrac_sushy, "connect",
+                              return_value=(mock_idrac["root"], mock_idrac["manager"], mock_idrac["system"])):
+                with pytest.raises(idrac_sushy.InstallerError, match="Virtual media insert failed"):
+                    idrac_sushy.cmd_insert(default_args)
+
 
 class TestIDRACSetBootCD:
     def test_set_boot_cd(self, mock_idrac, default_args):

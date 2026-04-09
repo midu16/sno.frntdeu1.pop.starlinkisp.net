@@ -2,10 +2,12 @@
 """Apply abi-master-0/extra-manifests/operator-config in a safe order.
 
 1. ConfigMaps (no CRDs).
-2. Approve cluster-wide InstallPlans still pending (Manual approval).
-3. Wait for LVMS and SR-IOV ClusterServiceVersions (phase Succeeded).
-4. Wait for LVMS CRD, apply LVMCluster.
-5. Wait for SR-IOV CRDs, apply Sriov resources.
+2. If Machine Config is degraded (e.g. missing ``currentconfig``, master pool
+   not ready), restart MCD pods on affected nodes and wait for recovery.
+3. Approve cluster-wide InstallPlans still pending (Manual approval).
+4. Wait for LVMS and SR-IOV ClusterServiceVersions (phase Succeeded).
+5. Wait for LVMS CRD, apply LVMCluster.
+6. Wait for SR-IOV CRDs, apply Sriov resources.
 
 Uses the Kubernetes Python client (``kubernetes`` package) with kubeconfig
 authentication. Set ``KUBECONFIG`` or ``KUBECONFIG_PATH`` to the cluster
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -105,6 +108,299 @@ def _env_int(name: str, default: int) -> int:
         return int(str(raw).strip())
     except ValueError:
         return default
+
+
+# Machine Config Operator (MCO) — degraded master pool / missing currentconfig
+_CONFIG_GROUP = "config.openshift.io"
+_CONFIG_VERSION = "v1"
+_PLURAL_CLUSTER_OPERATORS = "clusteroperators"
+_MCFG_GROUP = "machineconfiguration.openshift.io"
+_MCFG_VERSION = "v1"
+_PLURAL_MACHINE_CONFIG_POOLS = "machineconfigpools"
+_MCP_MASTER = "master"
+_MCO_NS = "openshift-machine-config-operator"
+_MCD_LABEL_SELECTOR = "k8s-app=machine-config-daemon"
+_MCD_ISSUE_MARKERS = (
+    "machine-config-daemon/currentconfig",
+    "/etc/machine-config-daemon/currentconfig",
+    "machine-config-daemon/currentconfig: no such file",
+    "MachineConfigPool master is not ready",
+    "syncRequiredMachineConfigPools",
+)
+_NODE_REPORTING_RE = re.compile(
+    r"Node\s+([a-zA-Z0-9.-]+)\s+is\s+reporting",
+    re.IGNORECASE,
+)
+_MC_REMEDY_COOLDOWN_SEC = 300
+_MC_REMEDY_MAX_PER_RUN = 10
+
+
+def _get_cluster_operator(
+    custom: client.CustomObjectsApi,
+    name: str,
+) -> dict[str, Any] | None:
+    try:
+        obj = custom.get_cluster_custom_object(
+            group=_CONFIG_GROUP,
+            version=_CONFIG_VERSION,
+            plural=_PLURAL_CLUSTER_OPERATORS,
+            name=name,
+            _request_timeout=_rt(),
+        )
+    except ApiException as e:
+        if e.status in (403, 404):
+            return None
+        raise OperatorConfigError(
+            f"get clusteroperator/{name} failed: {e.reason or e}"
+        ) from e
+    return obj if isinstance(obj, dict) else None
+
+
+def _get_machine_config_pool(
+    custom: client.CustomObjectsApi,
+    name: str,
+) -> dict[str, Any] | None:
+    try:
+        obj = custom.get_cluster_custom_object(
+            group=_MCFG_GROUP,
+            version=_MCFG_VERSION,
+            plural=_PLURAL_MACHINE_CONFIG_POOLS,
+            name=name,
+            _request_timeout=_rt(),
+        )
+    except ApiException as e:
+        if e.status in (403, 404):
+            return None
+        raise OperatorConfigError(
+            f"get machineconfigpool/{name} failed: {e.reason or e}"
+        ) from e
+    return obj if isinstance(obj, dict) else None
+
+
+def _machine_config_diagnostic_blob(
+    custom: client.CustomObjectsApi,
+) -> str:
+    """Concatenate CO + MCP messages for substring matching."""
+    parts: list[str] = []
+    co = _get_cluster_operator(custom, "machine-config")
+    if co:
+        for c in co.get("status", {}).get("conditions", []):
+            parts.append(str(c.get("message", "")))
+            parts.append(str(c.get("reason", "")))
+    mcp = _get_machine_config_pool(custom, _MCP_MASTER)
+    if mcp:
+        for c in mcp.get("status", {}).get("conditions", []):
+            parts.append(str(c.get("message", "")))
+            parts.append(str(c.get("reason", "")))
+    return "\n".join(parts)
+
+
+def _matches_mcd_currentconfig_issue(diagnostic: str) -> bool:
+    t = diagnostic.lower()
+    if "currentconfig" in t and "no such file" in t:
+        return True
+    if "upgrade failure" in t and "currentconfig" in t:
+        return True
+    if "bootstrap" in t and "currentconfig" in t and "no such file" in t:
+        return True
+    for m in _MCD_ISSUE_MARKERS:
+        if m.lower() in t:
+            return True
+    return False
+
+
+def _co_machine_config_degraded(co: dict[str, Any] | None) -> bool:
+    if not co:
+        return False
+    for c in co.get("status", {}).get("conditions", []):
+        if c.get("type") == "Degraded" and c.get("status") == "True":
+            return True
+    return False
+
+
+def _mcp_master_needs_work(mcp: dict[str, Any] | None) -> bool:
+    if not mcp:
+        return False
+    st = mcp.get("status") or {}
+    if st.get("unavailableMachineCount") not in (None, 0):
+        return True
+    if st.get("degradedMachineCount") not in (None, 0):
+        return True
+    for c in st.get("conditions", []):
+        if c.get("type") == "Degraded" and c.get("status") == "True":
+            return True
+    return False
+
+
+def _parse_node_names_from_messages(text: str) -> list[str]:
+    found = _NODE_REPORTING_RE.findall(text)
+    out: list[str] = []
+    for n in found:
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _master_node_names(core_v1: client.CoreV1Api) -> list[str]:
+    out: list[str] = []
+    try:
+        nodes = core_v1.list_node(
+            label_selector="node-role.kubernetes.io/master=",
+            _request_timeout=_rt(),
+        )
+    except ApiException:
+        return out
+    for n in nodes.items or []:
+        if n.metadata and n.metadata.name:
+            out.append(n.metadata.name)
+    return out
+
+
+def _delete_mcd_pods_on_nodes(
+    core_v1: client.CoreV1Api,
+    node_names: list[str],
+) -> int:
+    """Delete MCD pods on the given nodes; return how many were deleted."""
+    deleted = 0
+    for node in node_names:
+        try:
+            pods = core_v1.list_namespaced_pod(
+                namespace=_MCO_NS,
+                label_selector=_MCD_LABEL_SELECTOR,
+                field_selector=f"spec.nodeName={node}",
+                _request_timeout=_rt(),
+            )
+        except ApiException as e:
+            print(f"  (list MCD pods on {node}: {e.reason or e})", flush=True)
+            continue
+        for pod in pods.items or []:
+            if not pod.metadata or not pod.metadata.name:
+                continue
+            pname = pod.metadata.name
+            print(
+                f"  deleting {_MCO_NS}/pod/{pname} (restart MCD on {node})",
+                flush=True,
+            )
+            try:
+                core_v1.delete_namespaced_pod(
+                    pname,
+                    _MCO_NS,
+                    _request_timeout=_rt(),
+                )
+                deleted += 1
+            except ApiException as e:
+                err = e.reason or e
+                print(f"  (delete {pname} failed: {err})", flush=True)
+    return deleted
+
+
+def _machine_config_recovered(
+    custom: client.CustomObjectsApi,
+) -> bool:
+    co = _get_cluster_operator(custom, "machine-config")
+    mcp = _get_machine_config_pool(custom, _MCP_MASTER)
+    if _co_machine_config_degraded(co):
+        return False
+    if mcp and _mcp_master_needs_work(mcp):
+        return False
+    return True
+
+
+def _wait_machine_config_recovered(
+    custom: client.CustomObjectsApi,
+    *,
+    timeout_sec: int,
+    poll_sec: int,
+) -> None:
+    print(
+        f"Waiting for machine-config / master pool to recover "
+        f"(up to {timeout_sec}s) ...",
+        flush=True,
+    )
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if _machine_config_recovered(custom):
+            print(
+                "machine-config ClusterOperator and master pool look healthy.",
+                flush=True,
+            )
+            return
+        time.sleep(poll_sec)
+    raise OperatorConfigError(
+        f"Timeout after {timeout_sec}s waiting for machine-config / "
+        "master MachineConfigPool to recover after remediation."
+    )
+
+
+class _McRemedyState:
+    __slots__ = ("count", "last_ts")
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.last_ts = 0.0
+
+
+def _maybe_remediate_machine_config(
+    custom: client.CustomObjectsApi,
+    core_v1: client.CoreV1Api,
+    *,
+    state: _McRemedyState,
+    wait_timeout_sec: int,
+    wait_poll_sec: int,
+    skip: bool,
+) -> None:
+    """If MCO shows currentconfig/master failure, restart MCD pods."""
+    if skip:
+        return
+    now = time.monotonic()
+    if state.count >= _MC_REMEDY_MAX_PER_RUN:
+        return
+    if state.last_ts and (now - state.last_ts) < _MC_REMEDY_COOLDOWN_SEC:
+        return
+
+    blob = _machine_config_diagnostic_blob(custom)
+    if not _matches_mcd_currentconfig_issue(blob):
+        return
+
+    co = _get_cluster_operator(custom, "machine-config")
+    mcp = _get_machine_config_pool(custom, _MCP_MASTER)
+    if not (
+        _co_machine_config_degraded(co) or _mcp_master_needs_work(mcp)
+    ):
+        return
+
+    nodes = _parse_node_names_from_messages(blob)
+    if not nodes:
+        nodes = _master_node_names(core_v1)
+    if not nodes:
+        print(
+            "Detected machine-config issue but could not determine node "
+            "names; see clusteroperator/machine-config and "
+            "machineconfigpool/master.",
+            flush=True,
+        )
+        return
+
+    print(
+        "Detected degraded machine-config (missing currentconfig / master "
+        "pool not ready). Restarting machine-config-daemon pod(s) ...",
+        flush=True,
+    )
+    n = _delete_mcd_pods_on_nodes(core_v1, nodes)
+    if n == 0:
+        print(
+            "  (no MCD pods deleted; check namespace and labels)",
+            flush=True,
+        )
+        return
+
+    state.count += 1
+    state.last_ts = now
+    _wait_machine_config_recovered(
+        custom,
+        timeout_sec=wait_timeout_sec,
+        poll_sec=wait_poll_sec,
+    )
 
 
 def _iter_namespace_names(core_v1: client.CoreV1Api) -> list[str]:
@@ -271,6 +567,10 @@ def _wait_csv_succeeded(
     core_v1: client.CoreV1Api,
     timeout_sec: int,
     poll_sec: int,
+    mc_state: _McRemedyState | None,
+    mc_wait_timeout_sec: int,
+    mc_wait_poll_sec: int,
+    skip_mc_remediation: bool,
 ) -> None:
     msg = (
         f"Waiting for {description} CSV (name prefix {name_prefix}) "
@@ -279,6 +579,15 @@ def _wait_csv_succeeded(
     print(msg, flush=True)
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
+        if mc_state is not None:
+            _maybe_remediate_machine_config(
+                custom,
+                core_v1,
+                state=mc_state,
+                wait_timeout_sec=mc_wait_timeout_sec,
+                wait_poll_sec=mc_wait_poll_sec,
+                skip=skip_mc_remediation,
+            )
         try:
             data = custom.list_namespaced_custom_object(
                 group=_OLM_GROUP,
@@ -330,6 +639,10 @@ def _wait_required_operator_csvs(
     core_v1: client.CoreV1Api,
     csv_timeout_sec: int,
     csv_poll_sec: int,
+    mc_state: _McRemedyState | None,
+    mc_wait_timeout_sec: int,
+    mc_wait_poll_sec: int,
+    skip_mc_remediation: bool,
 ) -> None:
     targets: tuple[tuple[str, str, str], ...] = (
         ("openshift-storage", "lvms-operator", "LVMS"),
@@ -348,6 +661,10 @@ def _wait_required_operator_csvs(
             core_v1=core_v1,
             timeout_sec=csv_timeout_sec,
             poll_sec=csv_poll_sec,
+            mc_state=mc_state,
+            mc_wait_timeout_sec=mc_wait_timeout_sec,
+            mc_wait_poll_sec=mc_wait_poll_sec,
+            skip_mc_remediation=skip_mc_remediation,
         )
     print("All target operators report CSV Succeeded.", flush=True)
 
@@ -490,12 +807,25 @@ def apply_operator_config(
     csv_timeout_sec: int = 1800,
     csv_poll_sec: int = 15,
     crd_timeout_sec: int = 900,
+    mc_remediate_timeout_sec: int = 3600,
+    mc_remediate_poll_sec: int = 15,
+    skip_mc_remediation: bool = False,
 ) -> None:
     d = _operator_config_dir()
     if not d.is_dir():
         raise OperatorConfigError(f"Directory not found: {d}")
 
     api_client, core_v1, custom, ext = _load_clients(kubeconfig)
+
+    mc_state = _McRemedyState()
+    _maybe_remediate_machine_config(
+        custom,
+        core_v1,
+        state=mc_state,
+        wait_timeout_sec=mc_remediate_timeout_sec,
+        wait_poll_sec=mc_remediate_poll_sec,
+        skip=skip_mc_remediation,
+    )
 
     _apply_file(d / "monitoring-config-cm.yaml", api_client=api_client)
     _apply_file(d / "supported-nic-ids.yaml", api_client=api_client)
@@ -507,6 +837,10 @@ def apply_operator_config(
         core_v1=core_v1,
         csv_timeout_sec=csv_timeout_sec,
         csv_poll_sec=csv_poll_sec,
+        mc_state=mc_state,
+        mc_wait_timeout_sec=mc_remediate_timeout_sec,
+        mc_wait_poll_sec=mc_remediate_poll_sec,
+        skip_mc_remediation=skip_mc_remediation,
     )
 
     _wait_crd(
@@ -538,8 +872,9 @@ def apply_operator_config(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=(
-            "Apply operator-config manifests: approve pending InstallPlans, "
-            "wait for LVMS/SR-IOV CSVs, then for CRDs as needed."
+            "Apply operator-config manifests: remediate stuck machine-config "
+            "if needed, approve pending InstallPlans, wait for LVMS/SR-IOV "
+            "CSVs, then for CRDs as needed."
         ),
     )
     p.add_argument(
@@ -573,6 +908,31 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SEC",
         help="Seconds to wait for each CRD (default: 900).",
     )
+    p.add_argument(
+        "--mc-remediate-timeout",
+        type=int,
+        default=_env_int("MC_REMEDIATE_TIMEOUT_SEC", 3600),
+        metavar="SEC",
+        help=(
+            "Seconds to wait for machine-config / master pool after MCD pod "
+            "restart (default: 3600, or MC_REMEDIATE_TIMEOUT_SEC)."
+        ),
+    )
+    p.add_argument(
+        "--mc-remediate-poll",
+        type=int,
+        default=15,
+        metavar="SEC",
+        help="Poll interval during MCO recovery wait (default: 15).",
+    )
+    p.add_argument(
+        "--skip-mc-remediation",
+        action="store_true",
+        help=(
+            "Do not restart machine-config-daemon pods when the master pool "
+            "is degraded with missing currentconfig."
+        ),
+    )
     args = p.parse_args(argv)
 
     try:
@@ -582,6 +942,9 @@ def main(argv: list[str] | None = None) -> int:
             csv_timeout_sec=args.csv_timeout,
             csv_poll_sec=args.csv_poll,
             crd_timeout_sec=args.crd_timeout,
+            mc_remediate_timeout_sec=args.mc_remediate_timeout,
+            mc_remediate_poll_sec=args.mc_remediate_poll,
+            skip_mc_remediation=args.skip_mc_remediation,
         )
     except OperatorConfigError as e:
         print(f"Error: {e}", file=sys.stderr, flush=True)

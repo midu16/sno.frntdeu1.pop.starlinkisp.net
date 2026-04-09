@@ -95,12 +95,14 @@ Individual iDRAC operations: `make status`, `make eject`, `make set-boot-cd`, `m
 ```bash
 export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
 
-# Install Day-2 operators
-oc create -f ./abi-master-0/extra-manifests/operator-install/
+# Install Day-2 operators (idempotent)
+oc apply -f ./abi-master-0/extra-manifests/operator-install/
 
-# Approve pending install plans
-oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' \
-  | xargs -n2 sh -c 'oc patch installplan $1 -n $0 --type merge -p "{\"spec\": {\"approved\": true}}"'
+# Approve InstallPlans, wait for LVMS/SR-IOV, apply operator-config manifests
+./.venv/bin/python3 scripts/apply_operator_config.py
+
+# Optional: supplementary node_exporter metrics (see docs/node-exporter-zoneinfo*.md)
+oc apply -k ./abi-master-0/extra-manifests/node-exporter-zoneinfo/
 ```
 
 Hub-specific operators and isolated cores are configured via manifests under `abi-master-0/openshift/` (e.g. [pao.yaml](./abi-master-0/openshift/pao.yaml)) and `abi-master-0/extra-manifests/`.
@@ -116,7 +118,7 @@ make lint          # flake8 on idrac_sushy.py and test_idrac_sushy.py
 
 ## CI/CD
 
-The workflow [.github/workflows/install.yml](./.github/workflows/install.yml) provides a manual trigger (`workflow_dispatch`) to run a full SNO install on a self-hosted runner. It uses secrets for `IDRAC_PW` and an input for the OpenShift version. The job checks out the repo, runs `make deps`, installs system prerequisites (nmstate, sshpass) with a pip fallback for nmstate when the system package is unavailable, then runs `make install` with `PATH` including `.venv/bin` so `nmstatectl` from pip is found.
+The workflow [.github/workflows/install.yml](./.github/workflows/install.yml) provides a manual trigger (`workflow_dispatch`) to run a full SNO install on a self-hosted runner. It uses secrets for `IDRAC_PW` and an input for the OpenShift version. The job checks out the repo, runs `make deps` (installs `requirements.txt`, including the Kubernetes Python client), then runs `make install` with `PATH` including `.venv/bin` so `nmstatectl` from pip is found. After the cluster is up it applies `operator-install`, validates cluster operators, runs `scripts/apply_operator_config.py` (InstallPlan approval, operator waits, manifests), and applies `node-exporter-zoneinfo`.
 
 ## Use cases
 

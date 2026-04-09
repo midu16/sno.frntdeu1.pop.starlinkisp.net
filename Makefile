@@ -28,7 +28,7 @@ help:
 	@echo "SNO OpenShift Installer — Makefile targets"
 	@echo ""
 	@echo "  Setup"
-	@echo "    deps               Create .venv (if needed) and install Python deps (sushy, pytest)"
+	@echo "    deps               Create .venv (if needed) and pip install -r requirements.txt"
 	@echo "    clean              Remove workdir, caches, openshift-install"
 	@echo ""
 	@echo "  Full workflow"
@@ -88,7 +88,7 @@ deps:
 		fi; \
 	fi; \
 	$(VENV_DIR)/bin/pip install --upgrade pip; \
-	$(VENV_DIR)/bin/pip install sushy sushy-oem-idrac pytest pytest-cov flake8
+	$(VENV_DIR)/bin/pip install -r requirements.txt
 	@echo "Dependencies installed. Use: make install (or $(VENV_DIR)/bin/python3 $(SCRIPT) ...)"
 
 clean:

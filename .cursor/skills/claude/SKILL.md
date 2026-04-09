@@ -156,9 +156,9 @@ make lint
 ```bash
 export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
 
-# Approve pending install plans (Day-2 operators)
-oc get installplan -A -o jsonpath='{range .items[?(@.spec.approved==false)]}{.metadata.namespace} {.metadata.name}{"\n"}{end}' \
-  | xargs -n2 sh -c 'oc patch installplan $1 -n $0 --type merge -p "{\"spec\": {\"approved\": true}}"'
+# Approve InstallPlans, wait for LVMS/SR-IOV CSVs, apply operator-config (Python + kubernetes client)
+make deps   # if not already: installs requirements.txt including kubernetes
+./.venv/bin/python3 scripts/apply_operator_config.py
 ```
 
 ## Environment Details

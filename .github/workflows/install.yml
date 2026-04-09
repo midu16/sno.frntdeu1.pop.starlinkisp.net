@@ -40,8 +40,9 @@ jobs:
       - name: ⏱️ Wait for Cluster Operators
         run: oc --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available clusteroperators --all --timeout=1800s
 
+      # Idempotent: subscriptions/namespaces may already exist on workflow retry.
       - name: Apply operator-install manifests
-        run: oc create --kubeconfig="${KUBECONFIG_PATH}" -f abi-master-0/extra-manifests/operator-install/
+        run: oc apply --kubeconfig="${KUBECONFIG_PATH}" -f abi-master-0/extra-manifests/operator-install/
 
       - name: 🚨 Validate no degraded operators
         run: |
@@ -52,19 +53,14 @@ jobs:
           fi
           echo "✅ No degraded Operators"
 
-      - name: "✅ Approve all InstallPlans"
-        run: |
-            oc --kubeconfig="${KUBECONFIG_PATH}" get installplan -A -o json | \
-              jq -r '.items[] | select(.spec.approved != true) | "\(.metadata.namespace) \(.metadata.name)"' | \
-              while read -r ns name; do
-                echo "Approving InstallPlan $name in namespace $ns"
-                oc --kubeconfig="${KUBECONFIG_PATH}" -n "$ns" patch installplan "$name" --type merge -p '{"spec":{"approved":true}}'
-              done
-            echo "✅ InstallPlan approval complete"
+      # InstallPlan approval, CSV waits, and operator CRs are implemented in scripts/apply_operator_config.py
+      # (uses kubernetes Python client; requires make deps / requirements.txt).
+      - name: Apply operator-config (InstallPlans, LVMS/SR-IOV, manifests)
+        run: ./.venv/bin/python3 scripts/apply_operator_config.py --kubeconfig="${KUBECONFIG_PATH}"
 
-      - name: Apply operator-config manifests
-        run: export PATH="$PWD/.venv/bin:$PATH" && python3 scripts/apply_operator_config.py --kubeconfig="${KUBECONFIG_PATH}"
-         
+      - name: Apply node-exporter-zoneinfo (monitoring)
+        run: oc apply --kubeconfig="${KUBECONFIG_PATH}" -k abi-master-0/extra-manifests/node-exporter-zoneinfo/
+
       - name: Upload auth artifact for kubeconfig
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

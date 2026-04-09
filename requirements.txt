@@ -1,5 +1,6 @@
 sushy
 sushy-oem-idrac
+kubernetes>=28.0.0
 pytest
 pytest-cov
 flake8

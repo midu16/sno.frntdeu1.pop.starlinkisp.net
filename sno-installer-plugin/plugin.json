@@ -1,0 +1,34 @@
+{
+  "name": "sno-installer-plugin",
+  "version": "1.0.0",
+  "description": "A Claude Code plugin for automating Single Node OpenShift (SNO) installation and management via iDRAC and Agent-Based Installer.",
+  "commands": [
+    {
+      "name": "install-sno",
+      "description": "Performs a full end-to-end SNO installation using the Agent-Based Installer and iDRAC management.",
+      "parameters": [
+        {
+          "name": "idrac_pw",
+          "type": "string",
+          "description": "The iDRAC password for the target server.",
+          "required": true
+        },
+        {
+          "name": "ocp_version",
+          "type": "string",
+          "description": "The OpenShift version to install (e.g., 4.18.6).",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "skills": [
+    {
+      "name": "sno-installer-skill",
+      "description": "Provides specialized capabilities for SNO lifecycle management, including troubleshooting, recovery, and network configuration."
+    }
+  ],
+  "dependencies": {
+    "node": ">=18.0.0"
+  }
+}

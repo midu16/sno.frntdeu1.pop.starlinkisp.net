@@ -12,7 +12,13 @@ export IDRAC_USER
 export INSTALL_WAIT_ATTEMPTS
 # Optional: after primary waits fail, extra install-complete rounds if kubeconfig exists (see idrac_sushy.py)
 export REMEDIATION_INSTALL_WAIT_ATTEMPTS
-
+# Optional: copy-iso / iDRAC deploy pacing (see idrac_sushy.py)
+export POST_COPY_ISO_SLEEP_SEC
+export ISO_HTTP_PROBE
+export IDRAC_DEPLOY_AFTER_EJECT_SEC
+export IDRAC_DEPLOY_AFTER_INSERT_SEC
+export IDRAC_DEPLOY_BEFORE_RESTART_SEC
+export IDRAC_DEPLOY_AFTER_RESTART_SEC
 OCP_VERSION ?=
 OCP_FLAG     = $(if $(OCP_VERSION),--ocp-version $(OCP_VERSION),)
 
@@ -68,6 +74,9 @@ help:
 	@echo "    IDRAC_USER         iDRAC username (default: root)"
 	@echo "    INSTALL_WAIT_ATTEMPTS        Primary install-complete retries (default: 2)"
 	@echo "    REMEDIATION_INSTALL_WAIT_ATTEMPTS  Extra rounds after primary failure if kubeconfig exists (default: 0)"
+	@echo "    POST_COPY_ISO_SLEEP_SEC     Wait after scp before iDRAC (default: 0)"
+	@echo "    ISO_HTTP_PROBE              1/true: range-GET ISO URL after copy (default: off)"
+	@echo "    IDRAC_DEPLOY_*_SEC          Deploy pacing (defaults in idrac_sushy.cmd_deploy)"
 	@echo "    OCP_VERSION        OpenShift version (default: 4.22.0-ec.3)"
 	@echo ""
 	@echo "  Examples"

@@ -36,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 from subprocess import CalledProcessError
 
@@ -82,6 +83,48 @@ def _remediation_install_attempts(args):
     if v is not None:
         return max(0, int(v))
     return _default_remediation_install_wait_attempts()
+
+
+def _timing_seconds(env_key: str, default: int) -> int:
+    """Parse non-negative sleep duration from env; invalid or empty → default."""
+    raw = os.environ.get(env_key, "").strip()
+    if not raw:
+        return max(0, int(default))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return max(0, int(default))
+
+
+def _timing_pause(description: str, env_key: str, default_seconds: int) -> None:
+    secs = _timing_seconds(env_key, default_seconds)
+    if secs <= 0:
+        return
+    print(f"Waiting {secs}s ({description}); env={env_key} ...", flush=True)
+    time.sleep(secs)
+
+
+def _agent_iso_http_url(args):
+    u = getattr(args, "iso_url", None)
+    if u:
+        return u
+    remote_host = _attr(args, "remote_host")
+    return f"http://{remote_host}:8080/OSs/agent.x86_64.iso"
+
+
+def _probe_agent_iso_http(url: str) -> None:
+    """Confirm the BMC will get a sane HTTP response when fetching the mounted ISO."""
+    req = urllib.request.Request(url)
+    req.add_header("Range", "bytes=0-0")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            code = getattr(resp, "status", resp.getcode())
+            if code not in (200, 206):
+                raise InstallerError(f"ISO HTTP probe failed: {url} HTTP {code}")
+            resp.read(1)
+        print(f"  ISO HTTP probe OK (range GET): {url}")
+    except Exception as e:
+        raise InstallerError(f"ISO HTTP probe failed for {url}: {e}") from e
 
 
 class InstallerError(Exception):
@@ -467,6 +510,14 @@ def cmd_copy_iso(args):
     run_cmd(["scp", str(iso_path), dest])
     print("  ISO copied.")
 
+    _timing_pause("post-SCP filesystem / HTTP export settle", "POST_COPY_ISO_SLEEP_SEC", 0)
+
+    probe = os.environ.get("ISO_HTTP_PROBE", "").strip().lower()
+    if probe in ("1", "true", "yes", "on"):
+        url = _agent_iso_http_url(args)
+        print(f"Probing agent ISO HTTP reachability ({url}) ...")
+        _probe_agent_iso_http(url)
+
 
 # ---------------------------------------------------------------------------
 # iDRAC operations (sushy)
@@ -643,12 +694,16 @@ def cmd_deploy(args):
         print("  Nothing to eject.")
     except Exception as e:
         print(f"  Eject skipped: {e}")
-    time.sleep(15)
+    _timing_pause("after Virtual CD eject", "IDRAC_DEPLOY_AFTER_EJECT_SEC", 15)
 
     # 2 — Insert
     print(f"Inserting virtual media: {iso_url}")
     insert_virtual_media(cd, iso_url)
-    time.sleep(10)
+    _timing_pause(
+        "after Virtual CD insert / HTTP mount (lets BMC pick up ISO)",
+        "IDRAC_DEPLOY_AFTER_INSERT_SEC",
+        10,
+    )
     cd.invalidate()
     cd.refresh(force=False)
     print(f"  Inserted: {cd.inserted}  Image: {cd.image}")
@@ -661,11 +716,17 @@ def cmd_deploy(args):
     print("  Boot device set via Dell OEM Redfish extension.")
     print(SEPARATOR)
 
+    _timing_pause(
+        "after boot order set (before ForceRestart)",
+        "IDRAC_DEPLOY_BEFORE_RESTART_SEC",
+        0,
+    )
+
     # 4 — Force restart
     print("Restarting server (ForceRestart) ...")
     system.reset_system(sushy.RESET_TYPE_FORCE_RESTART)
     print("  Restart command sent.")
-    time.sleep(30)
+    _timing_pause("after ForceRestart before polling power", "IDRAC_DEPLOY_AFTER_RESTART_SEC", 30)
 
     # 5 — Wait for power-on
     print("Waiting for server to power ON ...")

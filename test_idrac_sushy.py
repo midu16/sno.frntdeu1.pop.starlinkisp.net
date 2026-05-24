@@ -443,11 +443,26 @@ class TestCopyISO:
         (workdir / "agent.x86_64.iso").write_bytes(b"\x00" * 512)
         default_args.workdir = str(workdir)
 
-        idrac_sushy.cmd_copy_iso(default_args)
+        with patch.dict(os.environ, {"ISO_HTTP_PROBE": ""}, clear=False):
+            idrac_sushy.cmd_copy_iso(default_args)
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "scp"
         assert "rock@192.168.1.21:/apps/webcache/OSs/" in cmd[-1]
+
+    @patch.object(idrac_sushy, "_timing_pause")
+    @patch.object(idrac_sushy, "_probe_agent_iso_http")
+    @patch.object(idrac_sushy, "run_cmd")
+    def test_copy_runs_http_probe_when_enabled(self, mock_run, mock_probe, mock_pause, default_args, tmp_path):
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        (workdir / "agent.x86_64.iso").write_bytes(b"\x00" * 512)
+        default_args.workdir = str(workdir)
+        default_args.iso_url = "http://192.168.1.21:8080/OSs/agent.x86_64.iso"
+
+        with patch.dict(os.environ, {"ISO_HTTP_PROBE": "1"}, clear=False):
+            idrac_sushy.cmd_copy_iso(default_args)
+        mock_probe.assert_called_once_with(default_args.iso_url)
 
     def test_missing_iso_fails(self, default_args, tmp_path):
         default_args.workdir = str(tmp_path / "empty")

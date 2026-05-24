@@ -20,6 +20,31 @@ on:
         required: false
         default: "3"
         type: string
+      post_copy_iso_sleep_sec:
+        description: "POST_COPY_ISO_SLEEP_SEC — seconds after SCP so webcache/storage can expose the full ISO"
+        required: false
+        default: "120"
+        type: string
+      idrac_deploy_after_insert_sec:
+        description: "IDRAC_DEPLOY_AFTER_INSERT_SEC — seconds after Virtual CD insert before boot order + restart"
+        required: false
+        default: "120"
+        type: string
+      idrac_deploy_before_restart_sec:
+        description: "IDRAC_DEPLOY_BEFORE_RESTART_SEC — seconds after one-time CD boot is set before ForceRestart"
+        required: false
+        default: "30"
+        type: string
+      idrac_deploy_after_restart_sec:
+        description: "IDRAC_DEPLOY_AFTER_RESTART_SEC — seconds after ForceRestart before polling power state"
+        required: false
+        default: "45"
+        type: string
+      iso_http_probe:
+        description: "ISO_HTTP_PROBE — true/1 to confirm the ISO URL returns HTTP 200/206 before iDRAC reboot"
+        required: false
+        default: "true"
+        type: string
 
 defaults:
   run:
@@ -29,6 +54,11 @@ env:
   KUBECONFIG_PATH: ${{ github.workspace }}/workdir/auth/kubeconfig
   INSTALL_WAIT_ATTEMPTS: ${{ inputs.install_wait_attempts }}
   REMEDIATION_INSTALL_WAIT_ATTEMPTS: ${{ inputs.remediation_install_wait_attempts }}
+  POST_COPY_ISO_SLEEP_SEC: ${{ inputs.post_copy_iso_sleep_sec }}
+  IDRAC_DEPLOY_AFTER_INSERT_SEC: ${{ inputs.idrac_deploy_after_insert_sec }}
+  IDRAC_DEPLOY_BEFORE_RESTART_SEC: ${{ inputs.idrac_deploy_before_restart_sec }}
+  IDRAC_DEPLOY_AFTER_RESTART_SEC: ${{ inputs.idrac_deploy_after_restart_sec }}
+  ISO_HTTP_PROBE: ${{ inputs.iso_http_probe }}
 
 jobs:
   install:

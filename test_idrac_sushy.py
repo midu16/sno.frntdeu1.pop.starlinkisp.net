@@ -45,6 +45,7 @@ def default_args():
         interval=10,
         command="status",
         install_wait_attempts=2,
+        remediation_install_wait_attempts=None,
     )
 
 
@@ -506,6 +507,38 @@ class TestWaitInstall:
         with pytest.raises(idrac_sushy.InstallerError, match="Installer not found"):
             idrac_sushy.cmd_wait_install(default_args)
 
+    @patch.object(idrac_sushy, "cmd_wait_install")
+    def test_maybe_remediate_runs_second_wait_round(
+        self, mock_inner, default_args, tmp_path,
+    ):
+        installer = tmp_path / "openshift-install"
+        installer.touch()
+        workdir = tmp_path / "workdir"
+        (workdir / "auth").mkdir(parents=True)
+        (workdir / "auth" / "kubeconfig").write_text("kubeconfig-placeholder\n")
+        default_args.installer = str(installer)
+        default_args.workdir = str(workdir)
+        default_args.install_wait_attempts = 2
+        default_args.remediation_install_wait_attempts = 2
+
+        mock_inner.side_effect = [
+            subprocess.CalledProcessError(6, [str(installer)]),
+            None,
+        ]
+        idrac_sushy.cmd_wait_install_maybe_remediate(default_args)
+        assert mock_inner.call_count == 2
+
+    def test_maybe_remediate_no_kubeconfig_reraises(self, default_args, tmp_path):
+        installer = tmp_path / "openshift-install"
+        installer.touch()
+        default_args.installer = str(installer)
+        default_args.workdir = str(tmp_path / "workdir")
+        default_args.remediation_install_wait_attempts = 2
+        err = subprocess.CalledProcessError(6, [str(installer)])
+        with patch.object(idrac_sushy, "cmd_wait_install", side_effect=err):
+            with pytest.raises(subprocess.CalledProcessError):
+                idrac_sushy.cmd_wait_install_maybe_remediate(default_args)
+
 
 # ---------------------------------------------------------------------------
 # iDRAC operations (sushy)
@@ -709,7 +742,7 @@ class TestInstall:
              patch.object(idrac_sushy, "cmd_build_iso", make_spy("build")), \
              patch.object(idrac_sushy, "cmd_copy_iso", make_spy("copy")), \
              patch.object(idrac_sushy, "cmd_deploy", make_spy("deploy")), \
-             patch.object(idrac_sushy, "cmd_wait_install", make_spy("wait")):
+             patch.object(idrac_sushy, "cmd_wait_install_maybe_remediate", make_spy("wait")):
             idrac_sushy.cmd_install(default_args)
 
         assert called == ["preflight", "ssh", "extract", "configs", "build", "copy", "deploy", "wait"]
@@ -729,7 +762,7 @@ class TestInstall:
              patch.object(idrac_sushy, "cmd_build_iso", lambda a: None), \
              patch.object(idrac_sushy, "cmd_copy_iso", lambda a: None), \
              patch.object(idrac_sushy, "cmd_deploy", spy_deploy), \
-             patch.object(idrac_sushy, "cmd_wait_install", lambda a: None):
+             patch.object(idrac_sushy, "cmd_wait_install_maybe_remediate", lambda a: None):
             idrac_sushy.cmd_install(default_args)
 
         assert captured_args["iso_url"] == "http://10.0.0.1:8080/OSs/agent.x86_64.iso"
@@ -810,6 +843,11 @@ class TestCLI:
     def test_parse_install_with_iso_url(self):
         args = self._parse(["install", "--iso-url", "http://custom/agent.iso"])
         assert args.iso_url == "http://custom/agent.iso"
+
+    def test_parse_install_remediation(self):
+        args = self._parse(["install", "--remediation-install-wait-attempts", "4"])
+        assert args.command == "install"
+        assert args.remediation_install_wait_attempts == 4
 
     def test_parse_preflight(self):
         args = self._parse(["preflight"])

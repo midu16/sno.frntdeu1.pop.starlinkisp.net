@@ -10,6 +10,8 @@ export IDRAC_IP
 export IDRAC_USER
 # Optional: openshift-install allows ~90m per wait-for install-complete; default 2 attempts in idrac_sushy.py
 export INSTALL_WAIT_ATTEMPTS
+# Optional: after primary waits fail, extra install-complete rounds if kubeconfig exists (see idrac_sushy.py)
+export REMEDIATION_INSTALL_WAIT_ATTEMPTS
 
 OCP_VERSION ?=
 OCP_FLAG     = $(if $(OCP_VERSION),--ocp-version $(OCP_VERSION),)
@@ -64,6 +66,8 @@ help:
 	@echo "    IDRAC_PW           iDRAC password (required for iDRAC ops)"
 	@echo "    IDRAC_IP           iDRAC IP (default: 192.168.1.228)"
 	@echo "    IDRAC_USER         iDRAC username (default: root)"
+	@echo "    INSTALL_WAIT_ATTEMPTS        Primary install-complete retries (default: 2)"
+	@echo "    REMEDIATION_INSTALL_WAIT_ATTEMPTS  Extra rounds after primary failure if kubeconfig exists (default: 0)"
 	@echo "    OCP_VERSION        OpenShift version (default: 4.22.0-ec.3)"
 	@echo ""
 	@echo "  Examples"

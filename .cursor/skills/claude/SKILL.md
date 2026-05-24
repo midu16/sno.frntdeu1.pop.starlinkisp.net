@@ -79,13 +79,14 @@ Keep `machineNetwork`, `rendezvousIP`, and `networkConfig` IPs consistent.
 | `wait-power-on` | Poll until power state is On |
 | `deploy <iso_url>` | eject → insert → set-boot-cd → restart → wait-power-on |
 | `wait-install` | `openshift-install agent wait-for install-complete` |
-| `install` | Full workflow: preflight → ensure-ssh-key → extract-installer → prepare-configs → build-iso → copy-iso → deploy (default ISO URL) → wait-install |
+| `install` | Full workflow through deploy → `wait-for install-complete` (including optional remediation via `REMEDIATION_INSTALL_WAIT_ATTEMPTS` / `--remediation-install-wait-attempts` when kubeconfig exists after primary waits fail) |
 
 ### Flags
 
 - `--ip`, `--user`, `--password` — iDRAC
 - `--ocp-version` — OCP version (default in script)
 - `--iso-url` — for `install` (default: http://remote_host:8080/OSs/agent.x86_64.iso)
+- `--install-wait-attempts`, `--remediation-install-wait-attempts` — retries for primary and post-failure install-complete waits
 - `--workdir`, `--src-dir`, `--remote-host`, etc. — see `idrac_sushy.py --help`
 
 ## Makefile Targets
@@ -96,7 +97,7 @@ Keep `machineNetwork`, `rendezvousIP`, and `networkConfig` IPs consistent.
 - **iDRAC**: `status`, `eject`, `set-boot-cd`, `set-boot-hdd`, `restart`, `power-on`, `power-off`, `wait-power-on`
 - **Testing**: `test`, `test-verbose`, `test-coverage`, `lint`
 
-Environment: `IDRAC_PW`, `IDRAC_IP`, `IDRAC_USER`; Make passes them to the script. Example: `make install IDRAC_PW='pass' OCP_VERSION=4.18.6`.
+Environment: `IDRAC_PW`, `IDRAC_IP`, `IDRAC_USER`, `INSTALL_WAIT_ATTEMPTS`, `REMEDIATION_INSTALL_WAIT_ATTEMPTS`; Make exports them for the script. Example: `make install IDRAC_PW='pass' OCP_VERSION=4.18.6`.
 
 ## Running Installs
 

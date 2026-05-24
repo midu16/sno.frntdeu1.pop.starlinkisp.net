@@ -30,6 +30,7 @@ This repository automates the deployment of an **air-gapped Single Node OpenShif
 | `idrac_sushy.py` | Main CLI: full install workflow and iDRAC operations (Redfish/sushy). |
 | `test_idrac_sushy.py` | Pytest-based tests for the installer. |
 | `Makefile` | Targets for `deps`, `install`, per-step commands, iDRAC ops, and tests. |
+| `scripts/collect_abi_install_diagnostics.sh` | Bundles installer + `oc` diagnostics for CI (used on workflow failure). |
 | `requirements.txt` | Python dependencies (sushy, pytest, etc.). |
 | `abi-master-0/install-config.yaml` | OpenShift install config template (pull secret and SSH key are templated at run time). |
 | `abi-master-0/agent-config.yaml` | Agent installer config (network, disk hints, NTP). |
@@ -65,7 +66,7 @@ make install
 make install OCP_VERSION=4.19.23
 ```
 
-The install workflow: preflight → ensure SSH key → extract `openshift-install` → prepare configs → build agent ISO → copy ISO to webcache host → iDRAC deploy (eject, insert, set boot to VirtualCD, restart, wait for power on) → wait for install-complete.
+The install workflow: preflight → ensure SSH key → extract `openshift-install` → prepare configs → build agent ISO → copy ISO to webcache host → iDRAC deploy (eject, insert, set boot to VirtualCD, restart, wait for power on) → wait for install-complete (with optional **remediation**: if those waits exhaust but `workdir/auth/kubeconfig` exists, more `wait-for install-complete` rounds — env `REMEDIATION_INSTALL_WAIT_ATTEMPTS`, default `0` offline; the GitHub workflow defaults it to `3`).
 
 ## Configuration
 
@@ -118,7 +119,7 @@ make lint          # flake8 on idrac_sushy.py and test_idrac_sushy.py
 
 ## CI/CD
 
-The workflow [.github/workflows/install.yml](./.github/workflows/install.yml) provides a manual trigger (`workflow_dispatch`) to run a full SNO install on a self-hosted runner. It uses secrets for `IDRAC_PW` and an input for the OpenShift version. The job checks out the repo, runs `make deps` (installs `requirements.txt`, including the Kubernetes Python client), then runs `make install` with `PATH` including `.venv/bin` so `nmstatectl` from pip is found. After the cluster is up it applies `operator-install`, validates cluster operators, runs `scripts/apply_operator_config.py` (InstallPlan approval, operator waits, manifests), and applies `node-exporter-zoneinfo`.
+The workflow [.github/workflows/install.yml](./.github/workflows/install.yml) provides a manual trigger (`workflow_dispatch`) to run a full SNO install on a self-hosted runner. It uses secrets for `IDRAC_PW` and workflow inputs for the OpenShift version, primary `INSTALL_WAIT_ATTEMPTS`, and post-failure **`REMEDIATION_INSTALL_WAIT_ATTEMPTS`** (extra `install-complete` rounds when `workdir/auth/kubeconfig` already exists — useful if MachineConfig or other COs reconcile slowly after bootstrap). On install failure it uploads **`abi-install-diagnostics`** (installer state and `oc` snapshots when the API is reachable). The job checks out the repo, runs `make deps` (including the Kubernetes Python client), then runs `make install` with `PATH` including `.venv/bin` so `nmstatectl` from pip is found. After the cluster is up it applies `operator-install`, validates cluster operators, runs `scripts/apply_operator_config.py`, and applies `node-exporter-zoneinfo`.
 
 ## Use cases
 

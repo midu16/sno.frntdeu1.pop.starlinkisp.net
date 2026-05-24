@@ -65,6 +65,25 @@ def _default_install_wait_attempts():
         return 2
 
 
+def _default_remediation_install_wait_attempts():
+    """Extra wait-for rounds after primary waits fail (e.g. MCO reconciling slowly).
+
+    Env REMEDIATION_INSTALL_WAIT_ATTEMPTS (non-negative integer). Default 0 = disabled.
+    """
+    raw = os.environ.get("REMEDIATION_INSTALL_WAIT_ATTEMPTS", "0")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def _remediation_install_attempts(args):
+    v = getattr(args, "remediation_install_wait_attempts", None)
+    if v is not None:
+        return max(0, int(v))
+    return _default_remediation_install_wait_attempts()
+
+
 class InstallerError(Exception):
     """Raised when an installation step fails."""
 
@@ -697,6 +716,34 @@ def cmd_wait_install(args):
             )
 
 
+def cmd_wait_install_maybe_remediate(args):
+    """Run install-complete waits; if they fail but kubeconfig exists, run extra wait rounds.
+
+    Helps when bootstrap finished and the API is up but MachineConfig (or other COs) needs
+    longer than openshift-install's single deadline per attempt.
+    """
+    kubeconfig = Path(_attr(args, "workdir")).resolve() / "auth" / "kubeconfig"
+    try:
+        cmd_wait_install(args)
+    except CalledProcessError:
+        remediation = _remediation_install_attempts(args)
+        if remediation < 1 or not kubeconfig.is_file():
+            raise
+        print(SEPARATOR)
+        print(
+            "[Remediation] install-complete waits failed while a kubeconfig exists; "
+            "the cluster may still become ready (e.g. slow MachineConfig reconcile)."
+        )
+        print(
+            f"[Remediation] Running {remediation} extra wait-for install-complete attempt(s); "
+            f"Kubeconfig = {kubeconfig}",
+            flush=True,
+        )
+        print(SEPARATOR)
+        args.install_wait_attempts = remediation
+        cmd_wait_install(args)
+
+
 # ---------------------------------------------------------------------------
 # Full end-to-end install
 # ---------------------------------------------------------------------------
@@ -716,7 +763,7 @@ def cmd_install(args):
         ("Build agent ISO", cmd_build_iso),
         ("Copy ISO to webcache", cmd_copy_iso),
         ("iDRAC deploy (eject -> insert -> boot -> restart -> wait)", cmd_deploy),
-        ("Wait for install-complete", cmd_wait_install),
+        ("Wait for install-complete", cmd_wait_install_maybe_remediate),
     ]
     total = len(steps)
 
@@ -820,6 +867,16 @@ def build_parser():
         metavar="N",
         help="Retries for openshift-install wait-for install-complete (~90m each). "
         "Default: env INSTALL_WAIT_ATTEMPTS or 2.",
+    )
+    p_full.add_argument(
+        "--remediation-install-wait-attempts",
+        dest="remediation_install_wait_attempts",
+        type=int,
+        default=None,
+        metavar="N",
+        help="After primary waits fail: if kubeconfig exists, retry install-complete "
+        "up to N more times (~90m each). "
+        "Default: env REMEDIATION_INSTALL_WAIT_ATTEMPTS or 0 (off).",
     )
 
     return parser

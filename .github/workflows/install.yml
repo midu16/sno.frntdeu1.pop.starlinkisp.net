@@ -9,9 +9,16 @@ on:
         default: "4.22.0-ec.3"
         type: string
       install_wait_attempts:
-        description: "INSTALL_WAIT_ATTEMPTS — retries for openshift-install wait-for install-complete (~90 min each; see idrac_sushy.py)"
+        description: "INSTALL_WAIT_ATTEMPTS — openshift-install retries per invocation (~90 min each)"
         required: false
         default: "2"
+        type: string
+      remediation_install_wait_attempts:
+        description: >
+          REMEDIATION_INSTALL_WAIT_ATTEMPTS — if primary waits fail but workdir/auth/kubeconfig exists,
+          run this many extra install-complete waits (helps slow MCO reconcile). Same ~90 min cadence each.
+        required: false
+        default: "3"
         type: string
 
 defaults:
@@ -21,11 +28,12 @@ defaults:
 env:
   KUBECONFIG_PATH: ${{ github.workspace }}/workdir/auth/kubeconfig
   INSTALL_WAIT_ATTEMPTS: ${{ inputs.install_wait_attempts }}
+  REMEDIATION_INSTALL_WAIT_ATTEMPTS: ${{ inputs.remediation_install_wait_attempts }}
 
 jobs:
   install:
     runs-on: self-hosted
-    # Long installs: ISO + iDRAC + bootstrap + multiple 90m wait-for install-complete attempts
+    # Long installs: ISO + iDRAC + bootstrap + primary waits + remediation waits
     timeout-minutes: 720
     steps:
       - name: Checkout
@@ -35,16 +43,37 @@ jobs:
         run: make deps
 
       - name: Run SNO install
-        run: export PATH="$PWD/.venv/bin:$PATH" && make install OCP_VERSION="${{ inputs.ocp_version }}" IDRAC_IP="192.168.1.228" IDRAC_USER="root" IDRAC_PW="${{ secrets.IDRAC_PW }}"
+        id: install
+        run: |
+          set -eo pipefail
+          export PATH="$PWD/.venv/bin:$PATH"
+          export INSTALL_WAIT_ATTEMPTS="${{ inputs.install_wait_attempts }}"
+          export REMEDIATION_INSTALL_WAIT_ATTEMPTS="${{ inputs.remediation_install_wait_attempts }}"
+          make install \
+            OCP_VERSION="${{ inputs.ocp_version }}" \
+            IDRAC_IP="192.168.1.228" \
+            IDRAC_USER="root" \
+            IDRAC_PW="${{ secrets.IDRAC_PW }}"
+      - name: Collect install diagnostics (failure)
+        if: failure()
+        run: chmod +x scripts/collect_abi_install_diagnostics.sh && scripts/collect_abi_install_diagnostics.sh
 
-      - name: ⏱️ Wait for Cluster Operators
+      - name: Upload ABI install diagnostics (failure)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: abi-install-diagnostics
+          path: abi-install-diagnostics/
+          retention-days: 7
+
+      - name: Wait for Cluster Operators
         run: oc --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available clusteroperators --all --timeout=1800s
 
       # Idempotent: subscriptions/namespaces may already exist on workflow retry.
       - name: Apply operator-install manifests
         run: oc apply --kubeconfig="${KUBECONFIG_PATH}" -f abi-master-0/extra-manifests/operator-install/
 
-      - name: 🚨 Validate no degraded operators
+      - name: Validate no degraded operators
         run: |
           degraded=$(oc --kubeconfig="${KUBECONFIG_PATH}" get clusteroperators -o json | jq -r '.items[] | select(.status.conditions[] | select(.type=="Degraded" and .status=="True")) | .metadata.name')
           if [[ -n "$degraded" ]]; then

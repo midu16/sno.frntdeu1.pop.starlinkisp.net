@@ -12,6 +12,10 @@ export IDRAC_USER
 export INSTALL_WAIT_ATTEMPTS
 # Optional: after primary waits fail, extra install-complete rounds if kubeconfig exists (see idrac_sushy.py)
 export REMEDIATION_INSTALL_WAIT_ATTEMPTS
+# Optional: active MCO remediation between wait attempts (align annotations, CSRs, MCD restart)
+export SKIP_MC_REMEDIATION
+export MC_REMEDIATION_WAIT_SEC
+export FIX_WORKLOAD_PINNING
 # Optional: copy-iso / iDRAC deploy pacing (see idrac_sushy.py)
 export POST_COPY_ISO_SLEEP_SEC
 export ISO_HTTP_PROBE
@@ -138,6 +142,9 @@ deploy:
 
 wait-install:
 	$(PYTHON) $(SCRIPT) wait-install
+
+remediate-mco:
+	$(PYTHON) $(SCRIPT) remediate-mco
 
 # ---- iDRAC operations -------------------------------------------------------
 

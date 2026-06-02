@@ -25,13 +25,16 @@ Subcommands:
   wait-power-on      Poll until the server reaches powered-on state
   deploy             iDRAC full cycle: eject → insert → boot-cd → restart → wait
   wait-install       Wait for openshift-install agent install-complete
+  remediate-mco      Fix stuck machine-config (annotations, CSRs, MCD restart)
   install            Full end-to-end SNO installation (all steps above)
 """
 
 import argparse
+import base64
 import getpass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,6 +86,464 @@ def _remediation_install_attempts(args):
     if v is not None:
         return max(0, int(v))
     return _default_remediation_install_wait_attempts()
+
+
+def _skip_mc_remediation(args) -> bool:
+    if args is not None and getattr(args, "skip_mc_remediation", False):
+        return True
+    return os.environ.get("SKIP_MC_REMEDIATION", "").strip().lower() in ("1", "true", "yes")
+
+
+def _mc_remediation_wait_sec(args) -> int:
+    if args is not None:
+        v = getattr(args, "mc_remediation_wait_sec", None)
+        if v is not None:
+            return max(0, int(v))
+    raw = os.environ.get("MC_REMEDIATION_WAIT_SEC", "120")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 120
+
+
+_MCO_NS = "openshift-machine-config-operator"
+_MCP_MASTER = "master"
+_MCD_LABEL = "k8s-app=machine-config-daemon"
+_MCD_ISSUE_MARKERS = (
+    "machine-config-daemon/currentconfig",
+    "/etc/machine-config-daemon/currentconfig",
+    "currentconfig: no such file",
+    "MachineConfigPool master is not ready",
+    "syncRequiredMachineConfigPools",
+    "current config on disk during bootstrap",
+)
+_NODE_REPORTING_RE = re.compile(
+    r"Node\s+([a-zA-Z0-9.-]+)\s+is\s+reporting",
+    re.IGNORECASE,
+)
+_WLP_PATH = "/etc/kubernetes/openshift-workload-pinning"
+
+
+def _oc_env(kubeconfig: str) -> dict:
+    env = os.environ.copy()
+    env["KUBECONFIG"] = kubeconfig
+    return env
+
+
+def _oc_run(kubeconfig, *oc_args, check=False, capture=True, timeout=None):
+    cmd = ["oc", *oc_args]
+    print(f"  > {' '.join(cmd)}")
+    return subprocess.run(
+        cmd,
+        env=_oc_env(kubeconfig),
+        check=check,
+        capture_output=capture,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _oc_json(kubeconfig, *oc_args):
+    result = _oc_run(kubeconfig, *oc_args, "-o", "json")
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def _machine_config_diagnostic_text(kubeconfig) -> str:
+    parts = []
+    co = _oc_json(kubeconfig, "get", "clusteroperator", "machine-config")
+    if co:
+        for cond in co.get("status", {}).get("conditions", []):
+            parts.append(str(cond.get("message", "")))
+            parts.append(str(cond.get("reason", "")))
+    mcp = _oc_json(kubeconfig, "get", "machineconfigpool", _MCP_MASTER)
+    if mcp:
+        for cond in mcp.get("status", {}).get("conditions", []):
+            parts.append(str(cond.get("message", "")))
+            parts.append(str(cond.get("reason", "")))
+    return "\n".join(parts)
+
+
+def _matches_mcd_issue(text: str) -> bool:
+    t = text.lower()
+    if "currentconfig" in t and "no such file" in t:
+        return True
+    if "bootstrap" in t and "currentconfig" in t:
+        return True
+    for marker in _MCD_ISSUE_MARKERS:
+        if marker.lower() in t:
+            return True
+    return False
+
+
+def _co_machine_config_degraded(kubeconfig) -> bool:
+    co = _oc_json(kubeconfig, "get", "clusteroperator", "machine-config")
+    if not co:
+        return False
+    for cond in co.get("status", {}).get("conditions", []):
+        if cond.get("type") == "Degraded" and cond.get("status") == "True":
+            return True
+    return False
+
+
+def _mcp_master_needs_work(kubeconfig) -> bool:
+    mcp = _oc_json(kubeconfig, "get", "machineconfigpool", _MCP_MASTER)
+    if not mcp:
+        return False
+    st = mcp.get("status") or {}
+    for key in ("unavailableMachineCount", "degradedMachineCount"):
+        val = st.get(key)
+        if val not in (None, 0):
+            return True
+    for cond in st.get("conditions", []):
+        if cond.get("type") == "Degraded" and cond.get("status") == "True":
+            return True
+        if cond.get("type") == "Updated" and cond.get("status") != "True":
+            return True
+    return False
+
+
+def _mcp_master_updated(kubeconfig) -> bool:
+    mcp = _oc_json(kubeconfig, "get", "machineconfigpool", _MCP_MASTER)
+    if not mcp:
+        return False
+    st = mcp.get("status") or {}
+    if st.get("degradedMachineCount") not in (None, 0):
+        return False
+    for cond in st.get("conditions", []):
+        if cond.get("type") == "Updated" and cond.get("status") == "True":
+            return True
+    total = st.get("machineCount")
+    updated = st.get("updatedMachineCount")
+    return total is not None and updated == total
+
+
+def _master_node_names(kubeconfig) -> list:
+    data = _oc_json(
+        kubeconfig,
+        "get",
+        "nodes",
+        "-l",
+        "node-role.kubernetes.io/master=",
+    )
+    if not data:
+        return []
+    names = []
+    for item in data.get("items", []):
+        name = item.get("metadata", {}).get("name")
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _parse_node_names_from_messages(text: str) -> list:
+    found = _NODE_REPORTING_RE.findall(text)
+    out = []
+    for name in found:
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _machineconfig_exists(kubeconfig, name: str) -> bool:
+    if not name:
+        return False
+    result = _oc_run(kubeconfig, "get", "machineconfig", name)
+    return result.returncode == 0
+
+
+def _pool_rendered_config(kubeconfig) -> str | None:
+    mcp = _oc_json(kubeconfig, "get", "machineconfigpool", _MCP_MASTER)
+    if not mcp:
+        return None
+    name = (mcp.get("spec") or {}).get("configuration", {}).get("name")
+    return name if name else None
+
+
+def _align_node_mc_annotations(kubeconfig, node: str, rendered: str) -> bool:
+    node_obj = _oc_json(kubeconfig, "get", "node", node)
+    if not node_obj:
+        return False
+    ann = (node_obj.get("metadata") or {}).get("annotations") or {}
+    cur = ann.get("machineconfiguration.openshift.io/currentConfig", "")
+    des = ann.get("machineconfiguration.openshift.io/desiredConfig", "")
+    need = cur != rendered or des != rendered
+    if cur and not _machineconfig_exists(kubeconfig, cur):
+        print(f"  Node {node} references missing MachineConfig: currentConfig={cur}")
+        need = True
+    if not need:
+        return False
+    print(f"  Aligning node {node} MachineConfig annotations to {rendered}")
+    result = _oc_run(
+        kubeconfig,
+        "annotate",
+        "node",
+        node,
+        f"machineconfiguration.openshift.io/currentConfig={rendered}",
+        f"machineconfiguration.openshift.io/desiredConfig={rendered}",
+        "--overwrite",
+    )
+    return result.returncode == 0
+
+
+def _workload_pinning_bytes(kubeconfig, rendered: str) -> bytes | None:
+    mc = _oc_json(kubeconfig, "get", "machineconfig", rendered)
+    if not mc:
+        return None
+    for fspec in (mc.get("spec") or {}).get("config", {}).get("storage", {}).get("files", []):
+        if fspec.get("path") != _WLP_PATH:
+            continue
+        source = (fspec.get("contents") or {}).get("source", "")
+        prefix = "data:text/plain;charset=utf-8;base64,"
+        if not source.startswith(prefix):
+            return None
+        try:
+            return base64.b64decode(source[len(prefix):])
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _sync_workload_pinning(kubeconfig, node: str, rendered: str) -> bool:
+    content = _workload_pinning_bytes(kubeconfig, rendered)
+    if content is None:
+        return False
+    b64 = base64.b64encode(content).decode("ascii")
+    script = (
+        f"echo {b64} | base64 -d > {_WLP_PATH} && "
+        f"chmod 644 {_WLP_PATH}"
+    )
+    print(f"  Syncing {_WLP_PATH} on {node} from {rendered}")
+    try:
+        result = _oc_run(
+            kubeconfig,
+            "debug",
+            f"node/{node}",
+            "--",
+            "chroot",
+            "/host",
+            "sh",
+            "-c",
+            script,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"  WARNING: oc debug timed out syncing {_WLP_PATH} on {node}; "
+            "continuing with annotation/CSR/MCD remediation.",
+            flush=True,
+        )
+        return False
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"  WARNING: workload-pinning sync failed on {node}: {err}", flush=True)
+        return False
+    return True
+
+
+def _should_sync_workload_pinning(node_obj: dict, fix_wlp: bool) -> bool:
+    if fix_wlp:
+        return True
+    ann = (node_obj.get("metadata") or {}).get("annotations") or {}
+    reason = ann.get("machineconfiguration.openshift.io/reason", "")
+    markers = ("openshift-workload-pinning", "current config on disk during bootstrap")
+    return any(m in reason for m in markers)
+
+
+def _clear_stale_node_mc_state(kubeconfig, node: str, rendered: str) -> bool:
+    node_obj = _oc_json(kubeconfig, "get", "node", node)
+    if not node_obj:
+        return False
+    ann = (node_obj.get("metadata") or {}).get("annotations") or {}
+    state = ann.get("machineconfiguration.openshift.io/state", "")
+    reason = ann.get("machineconfiguration.openshift.io/reason", "")
+    cur = ann.get("machineconfiguration.openshift.io/currentConfig", "")
+    if state != "Degraded" and "currentconfig" not in reason.lower():
+        return False
+    if cur != rendered or not _mcp_master_updated(kubeconfig):
+        return False
+    print(f"  Clearing stale MachineConfig Degraded state on {node}")
+    result = _oc_run(
+        kubeconfig,
+        "annotate",
+        "node",
+        node,
+        "machineconfiguration.openshift.io/reason-",
+        "machineconfiguration.openshift.io/state=Done",
+        "--overwrite",
+    )
+    return result.returncode == 0
+
+
+def _pending_csr_names(kubeconfig) -> list:
+    data = _oc_json(kubeconfig, "get", "csr")
+    if not data:
+        return []
+    pending = []
+    for item in data.get("items", []):
+        meta = item.get("metadata") or {}
+        name = meta.get("name")
+        if not name:
+            continue
+        approved = any(
+            c.get("type") == "Approved" and c.get("status") == "True"
+            for c in (item.get("status") or {}).get("conditions", [])
+        )
+        if not approved:
+            pending.append(name)
+    return pending
+
+
+def _approve_pending_csrs(kubeconfig) -> int:
+    pending = _pending_csr_names(kubeconfig)
+    if not pending:
+        return 0
+    print(f"  Approving {len(pending)} pending CSR(s) ...")
+    result = _oc_run(
+        kubeconfig,
+        "adm",
+        "certificate",
+        "approve",
+        *pending,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        print(f"  WARNING: CSR approval failed: {err}", flush=True)
+        return 0
+    return len(pending)
+
+
+def _restart_mcd_pods(kubeconfig, nodes: list) -> int:
+    restarted = 0
+    for node in nodes:
+        pods = _oc_json(
+            kubeconfig,
+            "get",
+            "pods",
+            "-n",
+            _MCO_NS,
+            "-l",
+            _MCD_LABEL,
+            "--field-selector",
+            f"spec.nodeName={node}",
+        )
+        if not pods:
+            continue
+        for pod in pods.get("items", []):
+            meta = pod.get("metadata") or {}
+            name = meta.get("name")
+            if not name:
+                continue
+            phase = (pod.get("status") or {}).get("phase", "")
+            extra = ["--grace-period=0", "--force"] if phase == "Terminating" else []
+            print(f"  Restarting MCD pod {name} on {node}")
+            result = _oc_run(
+                kubeconfig,
+                "delete",
+                "pod",
+                name,
+                "-n",
+                _MCO_NS,
+                *extra,
+                "--wait=false",
+            )
+            if result.returncode == 0:
+                restarted += 1
+    return restarted
+
+
+def _wait_machine_config_recovery(kubeconfig, timeout_sec: int) -> None:
+    if timeout_sec <= 0:
+        return
+    print(f"  Waiting up to {timeout_sec}s for machine-config to recover ...", flush=True)
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if not _co_machine_config_degraded(kubeconfig) and not _mcp_master_needs_work(kubeconfig):
+            print("  machine-config ClusterOperator and master pool look healthy.", flush=True)
+            return
+        time.sleep(15)
+    print("  WARNING: machine-config still not fully healthy after remediation wait.", flush=True)
+
+
+def maybe_remediate_machine_config(kubeconfig_path, args=None) -> bool:
+    """Remediate stuck machine-config during install waits (best-effort).
+
+    Aligns stale node annotations, approves pending CSRs, syncs workload-pinning,
+    clears stale Degraded node state, and restarts machine-config-daemon pods.
+    Returns True if any remediation action ran.
+    """
+    if _skip_mc_remediation(args):
+        return False
+
+    kubeconfig = str(Path(kubeconfig_path).resolve())
+    if not Path(kubeconfig).is_file():
+        return False
+    if not shutil.which("oc"):
+        print("  WARNING: oc not in PATH; skipping machine-config remediation.", flush=True)
+        return False
+
+    blob = _machine_config_diagnostic_text(kubeconfig)
+    if not _matches_mcd_issue(blob):
+        return False
+    if not (_co_machine_config_degraded(kubeconfig) or _mcp_master_needs_work(kubeconfig)):
+        return False
+
+    rendered = _pool_rendered_config(kubeconfig)
+    if not rendered:
+        print("  WARNING: could not read machineconfigpool/master rendered config.", flush=True)
+        return False
+    if not _machineconfig_exists(kubeconfig, rendered):
+        print(
+            f"  WARNING: rendered MachineConfig {rendered} not found; "
+            "skipping node annotation remediation.",
+            flush=True,
+        )
+        rendered = None
+
+    nodes = _parse_node_names_from_messages(blob) or _master_node_names(kubeconfig)
+    if not nodes:
+        print("  WARNING: could not determine master node name for MCO remediation.", flush=True)
+        return False
+
+    print(SEPARATOR)
+    print("[MCO remediation] Stuck machine-config detected; applying recovery steps ...")
+    print(SEPARATOR)
+
+    acted = False
+    fix_wlp = os.environ.get("FIX_WORKLOAD_PINNING", "1").strip().lower() not in ("0", "false", "no")
+
+    n_csr = _approve_pending_csrs(kubeconfig)
+    acted = acted or n_csr > 0
+
+    if rendered:
+        for node in nodes:
+            if _align_node_mc_annotations(kubeconfig, node, rendered):
+                acted = True
+            node_obj = _oc_json(kubeconfig, "get", "node", node)
+            if node_obj and _should_sync_workload_pinning(node_obj, fix_wlp):
+                if _workload_pinning_bytes(kubeconfig, rendered) is not None:
+                    if _sync_workload_pinning(kubeconfig, node, rendered):
+                        acted = True
+
+    n_mcd = _restart_mcd_pods(kubeconfig, nodes)
+    acted = acted or n_mcd > 0
+
+    if rendered:
+        for node in nodes:
+            if _clear_stale_node_mc_state(kubeconfig, node, rendered):
+                acted = True
+
+    if acted:
+        _wait_machine_config_recovery(kubeconfig, _mc_remediation_wait_sec(args))
+    else:
+        print("  (no machine-config remediation actions were applied)", flush=True)
+
+    print(SEPARATOR)
+    return acted
 
 
 def _timing_seconds(env_key: str, default: int) -> int:
@@ -770,6 +1231,8 @@ def cmd_wait_install(args):
         except CalledProcessError as e:
             if attempt >= attempts:
                 raise
+            if kubeconfig.is_file():
+                maybe_remediate_machine_config(kubeconfig, args)
             print(
                 f"Install wait exited {e.returncode} (openshift-install allows ~90m per attempt). "
                 "Cluster may still be reconciling MachineConfig; retrying ...",
@@ -777,11 +1240,19 @@ def cmd_wait_install(args):
             )
 
 
-def cmd_wait_install_maybe_remediate(args):
-    """Run install-complete waits; if they fail but kubeconfig exists, run extra wait rounds.
+def cmd_remediate_mco(args):
+    """Run machine-config remediation against workdir/auth/kubeconfig."""
+    kubeconfig = Path(_attr(args, "workdir")).resolve() / "auth" / "kubeconfig"
+    if not kubeconfig.is_file():
+        raise InstallerError(f"Kubeconfig not found: {kubeconfig}")
+    os.environ["KUBECONFIG"] = str(kubeconfig)
+    if not maybe_remediate_machine_config(kubeconfig, args):
+        print("No machine-config remediation was needed or possible.")
 
-    Helps when bootstrap finished and the API is up but MachineConfig (or other COs) needs
-    longer than openshift-install's single deadline per attempt.
+
+def cmd_wait_install_maybe_remediate(args):
+    """Run install-complete waits; if they fail but kubeconfig exists, remediate MCO/CSRs
+    and run extra wait rounds.
     """
     kubeconfig = Path(_attr(args, "workdir")).resolve() / "auth" / "kubeconfig"
     try:
@@ -790,10 +1261,11 @@ def cmd_wait_install_maybe_remediate(args):
         remediation = _remediation_install_attempts(args)
         if remediation < 1 or not kubeconfig.is_file():
             raise
+        maybe_remediate_machine_config(kubeconfig, args)
         print(SEPARATOR)
         print(
             "[Remediation] install-complete waits failed while a kubeconfig exists; "
-            "the cluster may still become ready (e.g. slow MachineConfig reconcile)."
+            "machine-config remediation was attempted; running extra wait-for rounds."
         )
         print(
             f"[Remediation] Running {remediation} extra wait-for install-complete attempt(s); "
@@ -916,6 +1388,13 @@ def build_parser():
         help="Retries for openshift-install wait-for install-complete (~90m each). "
         "Default: env INSTALL_WAIT_ATTEMPTS or 2.",
     )
+    _add_mc_remediation_args(p_wi)
+
+    p_mco = sub.add_parser(
+        "remediate-mco",
+        help="Remediate stuck machine-config (annotations, CSRs, MCD restart)",
+    )
+    _add_mc_remediation_args(p_mco)
 
     p_full = sub.add_parser("install", help="Full end-to-end SNO OpenShift installation")
     p_full.add_argument("--iso-url", dest="iso_url", default=None,
@@ -939,8 +1418,28 @@ def build_parser():
         "up to N more times (~90m each). "
         "Default: env REMEDIATION_INSTALL_WAIT_ATTEMPTS or 0 (off).",
     )
+    _add_mc_remediation_args(p_full)
 
     return parser
+
+
+def _add_mc_remediation_args(parser):
+    parser.add_argument(
+        "--skip-mc-remediation",
+        dest="skip_mc_remediation",
+        action="store_true",
+        help="Do not run machine-config remediation (align annotations, approve CSRs, "
+        "restart MCD) between install-complete wait attempts. Env: SKIP_MC_REMEDIATION=1.",
+    )
+    parser.add_argument(
+        "--mc-remediation-wait-sec",
+        dest="mc_remediation_wait_sec",
+        type=int,
+        default=None,
+        metavar="SEC",
+        help="Seconds to wait for machine-config recovery after remediation. "
+        "Default: env MC_REMEDIATION_WAIT_SEC or 120.",
+    )
 
 
 DISPATCH = {
@@ -961,6 +1460,7 @@ DISPATCH = {
     "wait-power-on": cmd_wait_power_on,
     "deploy": cmd_deploy,
     "wait-install": cmd_wait_install,
+    "remediate-mco": cmd_remediate_mco,
     "install": cmd_install,
 }
 

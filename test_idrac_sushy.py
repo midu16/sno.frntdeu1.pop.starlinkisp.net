@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import textwrap
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -46,6 +47,8 @@ def default_args():
         command="status",
         install_wait_attempts=2,
         remediation_install_wait_attempts=None,
+        skip_mc_remediation=False,
+        mc_remediation_wait_sec=None,
     )
 
 
@@ -492,15 +495,20 @@ class TestWaitInstall:
     def test_wait_retries_on_failure(self, mock_run, default_args, tmp_path):
         installer = tmp_path / "openshift-install"
         installer.touch()
+        workdir = tmp_path / "workdir"
+        (workdir / "auth").mkdir(parents=True)
+        (workdir / "auth" / "kubeconfig").write_text("kubeconfig\n")
         default_args.installer = str(installer)
-        default_args.workdir = str(tmp_path / "workdir")
+        default_args.workdir = str(workdir)
         default_args.install_wait_attempts = 2
         mock_run.side_effect = [
             subprocess.CalledProcessError(6, [str(installer)]),
             None,
         ]
 
-        idrac_sushy.cmd_wait_install(default_args)
+        with patch.object(idrac_sushy, "maybe_remediate_machine_config") as mock_mco:
+            idrac_sushy.cmd_wait_install(default_args)
+            mock_mco.assert_called_once()
         assert mock_run.call_count == 2
 
     @patch.object(idrac_sushy, "run_cmd")
@@ -540,7 +548,9 @@ class TestWaitInstall:
             subprocess.CalledProcessError(6, [str(installer)]),
             None,
         ]
-        idrac_sushy.cmd_wait_install_maybe_remediate(default_args)
+        with patch.object(idrac_sushy, "maybe_remediate_machine_config") as mock_mco:
+            idrac_sushy.cmd_wait_install_maybe_remediate(default_args)
+            mock_mco.assert_called_once()
         assert mock_inner.call_count == 2
 
     def test_maybe_remediate_no_kubeconfig_reraises(self, default_args, tmp_path):
@@ -553,6 +563,69 @@ class TestWaitInstall:
         with patch.object(idrac_sushy, "cmd_wait_install", side_effect=err):
             with pytest.raises(subprocess.CalledProcessError):
                 idrac_sushy.cmd_wait_install_maybe_remediate(default_args)
+
+
+class TestMcRemediation:
+    def test_matches_mcd_issue(self):
+        assert idrac_sushy._matches_mcd_issue(
+            "open /etc/machine-config-daemon/currentconfig: no such file"
+        )
+        assert not idrac_sushy._matches_mcd_issue("All is well")
+
+    def test_maybe_remediate_runs_core_steps(self, tmp_path, default_args):
+        kc = tmp_path / "kubeconfig"
+        kc.write_text("api\n")
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    idrac_sushy,
+                    "_machine_config_diagnostic_text",
+                    return_value="currentconfig missing",
+                )
+            )
+            stack.enter_context(patch.object(idrac_sushy, "_matches_mcd_issue", return_value=True))
+            stack.enter_context(patch.object(idrac_sushy, "_co_machine_config_degraded", return_value=True))
+            stack.enter_context(patch.object(idrac_sushy, "_mcp_master_needs_work", return_value=True))
+            stack.enter_context(patch.object(idrac_sushy, "_parse_node_names_from_messages", return_value=[]))
+            stack.enter_context(patch.object(idrac_sushy, "_master_node_names", return_value=["master-0"]))
+            stack.enter_context(
+                patch.object(idrac_sushy, "_pool_rendered_config", return_value="rendered-master-abc")
+            )
+            stack.enter_context(patch.object(idrac_sushy, "_machineconfig_exists", return_value=True))
+            mock_align = stack.enter_context(
+                patch.object(idrac_sushy, "_align_node_mc_annotations", return_value=True)
+            )
+            mock_csr = stack.enter_context(
+                patch.object(idrac_sushy, "_approve_pending_csrs", return_value=2)
+            )
+            stack.enter_context(patch.object(idrac_sushy, "_workload_pinning_bytes", return_value=None))
+            stack.enter_context(patch.object(idrac_sushy, "_clear_stale_node_mc_state", return_value=False))
+            stack.enter_context(
+                patch.object(
+                    idrac_sushy,
+                    "_oc_json",
+                    return_value={"metadata": {"annotations": {}}},
+                )
+            )
+            mock_mcd = stack.enter_context(
+                patch.object(idrac_sushy, "_restart_mcd_pods", return_value=1)
+            )
+            stack.enter_context(patch.object(idrac_sushy, "_wait_machine_config_recovery"))
+            stack.enter_context(patch.object(idrac_sushy.shutil, "which", return_value="/usr/bin/oc"))
+            assert idrac_sushy.maybe_remediate_machine_config(kc, default_args) is True
+        mock_csr.assert_called_once()
+        mock_align.assert_called_once()
+        mock_mcd.assert_called_once_with(str(kc.resolve()), ["master-0"])
+
+    def test_maybe_remediate_skips_when_no_issue(self, tmp_path, default_args):
+        kc = tmp_path / "kubeconfig"
+        kc.write_text("api\n")
+        with patch.object(idrac_sushy, "_matches_mcd_issue", return_value=False):
+            assert idrac_sushy.maybe_remediate_machine_config(kc, default_args) is False
+
+    def test_skip_mc_remediation_flag(self, default_args):
+        default_args.skip_mc_remediation = True
+        assert idrac_sushy._skip_mc_remediation(default_args) is True
 
 
 # ---------------------------------------------------------------------------

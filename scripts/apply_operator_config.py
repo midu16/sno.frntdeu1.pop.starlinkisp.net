@@ -28,8 +28,8 @@ from typing import Any
 try:
     from kubernetes import client, config as k8s_config
     from kubernetes.client.exceptions import ApiException
-    from kubernetes.utils import create_from_yaml
-    from kubernetes.utils.create_from_yaml import FailToCreateError
+    from kubernetes.utils.create_from_yaml import FailToCreateError, create_from_dict
+    import yaml
 except ImportError as e:
     raise SystemExit(
         "Missing dependency: install the Kubernetes Python client "
@@ -779,7 +779,54 @@ def _wait_crd(
     )
 
 
+_SERVER_MANAGED_META_KEYS = (
+    "creationTimestamp",
+    "resourceVersion",
+    "uid",
+    "generation",
+    "managedFields",
+    "selfLink",
+)
+
+
+def _iter_yaml_docs(path: Path) -> list[dict[str, Any]]:
+    """Load multi-doc YAML; skip empty documents (e.g. leading ---)."""
+    with path.open(encoding="utf-8") as fh:
+        docs = list(yaml.safe_load_all(fh))
+    out: list[dict[str, Any]] = []
+    for doc in docs:
+        if isinstance(doc, dict) and doc.get("kind"):
+            out.append(doc)
+    return out
+
+
+def _sanitize_for_apply(doc: dict[str, Any]) -> dict[str, Any]:
+    """Drop cluster-instance metadata so re-apply works across reinstalls.
+
+    Exported ConfigMaps (e.g. supported-nic-ids) often retain uid /
+    resourceVersion / ownerReferences from a previous cluster; server-side
+    apply then fails with uid mismatch.
+    """
+    clean = dict(doc)
+    meta = dict(clean.get("metadata") or {})
+    for key in _SERVER_MANAGED_META_KEYS:
+        meta.pop(key, None)
+    # OLM will re-own operator-managed CMs; keep labels/annotations/name/ns.
+    meta.pop("ownerReferences", None)
+    clean["metadata"] = meta
+    clean.pop("status", None)
+    return clean
+
+
 def _apply_file(path: Path, *, api_client: client.ApiClient) -> None:
+    """Server-side apply each document using the object's metadata.namespace.
+
+    kubernetes.utils.create_from_yaml(..., apply=True) defaults namespace to
+    ``default`` and passes that into DynamicClient.server_side_apply even when
+    the object declares another namespace — the API then returns BadRequest
+    ("namespace of the provided object does not match the namespace sent on
+    the request"). Non-apply create_from_yaml avoids this by reading metadata.
+    """
     if not path.is_file():
         raise OperatorConfigError(f"Manifest not found: {path}")
     root = _repo_root()
@@ -788,17 +835,32 @@ def _apply_file(path: Path, *, api_client: client.ApiClient) -> None:
     except ValueError:
         display = str(path)
     print(f"Applying {display} ...", flush=True)
+    docs = _iter_yaml_docs(path)
+    if not docs:
+        raise OperatorConfigError(f"No Kubernetes objects found in {display}")
     try:
-        create_from_yaml(
-            api_client,
-            str(path),
-            verbose=False,
-            apply=True,
-        )
+        for doc in docs:
+            body = _sanitize_for_apply(doc)
+            meta = body.get("metadata") or {}
+            # Cluster-scoped objects omit namespace; still pass a placeholder
+            # that create_from_dict will drop for non-namespaced kinds on the
+            # create path — for apply=True the DynamicClient uses body ns.
+            ns = meta.get("namespace") or "default"
+            create_from_dict(
+                api_client,
+                body,
+                verbose=False,
+                apply=True,
+                namespace=ns,
+                # Take ownership when the object was previously applied by
+                # kubectl/oc (field manager conflict on .data / .spec).
+                force_conflicts=True,
+            )
     except FailToCreateError as e:
         raise OperatorConfigError(
             f"apply failed for {display}: {e}"
         ) from e
+    print(f"  applied {len(docs)} object(s) from {display}", flush=True)
 
 
 def apply_operator_config(

@@ -1,4 +1,8 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: supported-nic-ids
+  namespace: openshift-sriov-network-operator
 data:
   Broadcom_bnxt_en_BCM57414_NetXtreme-E: 14e4 16d7 16dc
   Broadcom_bnxt_en_BCM57504_NetXtreme-E: 14e4 1751 1806
@@ -44,20 +48,3 @@ data:
   Qlogic_qede_QL45000_50G: 1077 1654 1664
   Red_Hat_Virtio_1_0_network_device: 1af4 1041 1041
   Red_Hat_Virtio_network_device: 1af4 1000 1000
-kind: ConfigMap
-metadata:
-  creationTimestamp: "2026-03-12T12:55:55Z"
-  labels:
-    olm.managed: "true"
-    operators.coreos.com/sriov-network-operator.openshift-sriov-network-operator: ""
-  name: supported-nic-ids
-  namespace: openshift-sriov-network-operator
-  ownerReferences:
-  - apiVersion: operators.coreos.com/v1alpha1
-    blockOwnerDeletion: false
-    controller: false
-    kind: ClusterServiceVersion
-    name: sriov-network-operator.v4.19.0-202602241916
-    uid: 22f07fd4-252f-4f38-b084-7b106b438136
-  resourceVersion: "24258"
-  uid: 8d54d142-c781-42ce-9927-aef33fa249c4

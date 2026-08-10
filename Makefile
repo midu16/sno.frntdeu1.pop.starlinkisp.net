@@ -12,6 +12,11 @@ export IDRAC_USER
 export INSTALL_WAIT_ATTEMPTS
 # Optional: after primary waits fail, extra install-complete rounds if kubeconfig exists (see idrac_sushy.py)
 export REMEDIATION_INSTALL_WAIT_ATTEMPTS
+# Optional: wait for kube-apiserver /readyz between install-complete retries (SNO reboot)
+export API_READY_WAIT_SEC
+export API_READY_POLL_SEC
+export API_READY_SETTLE_SEC
+export API_READY_STABLE_POLLS
 # Optional: active MCO remediation between wait attempts (align annotations, CSRs, MCD restart)
 export SKIP_MC_REMEDIATION
 export MC_REMEDIATION_WAIT_SEC
@@ -78,6 +83,9 @@ help:
 	@echo "    IDRAC_USER         iDRAC username (default: root)"
 	@echo "    INSTALL_WAIT_ATTEMPTS        Primary install-complete retries (default: 2)"
 	@echo "    REMEDIATION_INSTALL_WAIT_ATTEMPTS  Extra rounds after primary failure if kubeconfig exists (default: 0)"
+	@echo "    API_READY_WAIT_SEC          Wait for /readyz between wait-for retries (default: 1800; 0=off)"
+	@echo "    API_READY_SETTLE_SEC        Settle after /readyz stable before retry (default: 90)"
+	@echo "    API_READY_STABLE_POLLS     Consecutive /readyz successes required (default: 3)"
 	@echo "    POST_COPY_ISO_SLEEP_SEC     Wait after scp before iDRAC (default: 0)"
 	@echo "    ISO_HTTP_PROBE              1/true: range-GET ISO URL after copy (default: off)"
 	@echo "    IDRAC_DEPLOY_*_SEC          Deploy pacing (defaults in idrac_sushy.cmd_deploy)"

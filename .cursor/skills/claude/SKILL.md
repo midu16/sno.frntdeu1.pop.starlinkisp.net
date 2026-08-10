@@ -87,6 +87,7 @@ Keep `machineNetwork`, `rendezvousIP`, and `networkConfig` IPs consistent.
 - `--ocp-version` — OCP version (default in script)
 - `--iso-url` — for `install` (default: http://remote_host:8080/OSs/agent.x86_64.iso)
 - `--install-wait-attempts`, `--remediation-install-wait-attempts` — retries for primary and post-failure install-complete waits
+- `--api-ready-wait-sec`, `--api-ready-settle-sec`, `--api-ready-stable-polls` — wait for kube-apiserver `/readyz` between wait-for retries (SNO MCO reboot / `no route to host` / `connection refused`)
 - `--workdir`, `--src-dir`, `--remote-host`, etc. — see `idrac_sushy.py --help`
 
 ## Makefile Targets
@@ -97,7 +98,7 @@ Keep `machineNetwork`, `rendezvousIP`, and `networkConfig` IPs consistent.
 - **iDRAC**: `status`, `eject`, `set-boot-cd`, `set-boot-hdd`, `restart`, `power-on`, `power-off`, `wait-power-on`
 - **Testing**: `test`, `test-verbose`, `test-coverage`, `lint`
 
-Environment: `IDRAC_PW`, `IDRAC_IP`, `IDRAC_USER`, `INSTALL_WAIT_ATTEMPTS`, `REMEDIATION_INSTALL_WAIT_ATTEMPTS`; Make exports them for the script. Example: `make install IDRAC_PW='pass' OCP_VERSION=4.18.6`.
+Environment: `IDRAC_PW`, `IDRAC_IP`, `IDRAC_USER`, `INSTALL_WAIT_ATTEMPTS`, `REMEDIATION_INSTALL_WAIT_ATTEMPTS`, `API_READY_WAIT_SEC`, `API_READY_SETTLE_SEC`, `API_READY_STABLE_POLLS`; Make exports them for the script. Example: `make install IDRAC_PW='pass' OCP_VERSION=4.18.6`.
 
 ## Running Installs
 

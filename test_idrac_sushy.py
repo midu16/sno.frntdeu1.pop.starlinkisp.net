@@ -39,6 +39,7 @@ def default_args():
         remote_user="rock",
         remote_host="192.168.1.21",
         remote_path="/apps/webcache/OSs/",
+        cluster_ip="192.168.1.133",
         ssh_key=str(Path.home() / ".ssh" / "id_ed25519.pub"),
         registry_auth=str(Path.home() / ".docker" / "config.json"),
         iso_url="http://192.168.1.21:8080/OSs/agent.x86_64.iso",
@@ -49,6 +50,10 @@ def default_args():
         remediation_install_wait_attempts=None,
         skip_mc_remediation=False,
         mc_remediation_wait_sec=None,
+        api_ready_wait_sec=0,
+        api_ready_poll_sec=1,
+        api_ready_settle_sec=0,
+        api_ready_stable_polls=1,
     )
 
 
@@ -253,23 +258,31 @@ class TestPreflight:
 # ---------------------------------------------------------------------------
 
 class TestEnsureSSHKey:
+    @patch.object(idrac_sushy, "_forget_remote_ssh_host_key")
+    @patch.object(idrac_sushy, "_forget_ssh_host_key")
     @patch.object(idrac_sushy, "run_cmd")
-    def test_key_exists_copies(self, mock_run, default_args, ssh_key_file):
+    def test_key_exists_copies(self, mock_run, mock_forget_local, mock_forget_remote, default_args, ssh_key_file):
         default_args.ssh_key = str(ssh_key_file)
         idrac_sushy.cmd_ensure_ssh_key(default_args)
         assert mock_run.call_count == 1
         sshpass_call = mock_run.call_args[0][0]
         assert "sshpass" in sshpass_call
         assert "ssh-copy-id" in sshpass_call
+        mock_forget_local.assert_called_once_with("192.168.1.133")
+        mock_forget_remote.assert_called_once()
 
+    @patch.object(idrac_sushy, "_forget_remote_ssh_host_key")
+    @patch.object(idrac_sushy, "_forget_ssh_host_key")
     @patch.object(idrac_sushy, "run_cmd")
-    def test_key_missing_generates_and_copies(self, mock_run, default_args, tmp_path):
+    def test_key_missing_generates_and_copies(self, mock_run, mock_forget_local, mock_forget_remote, default_args, tmp_path):
         key_path = tmp_path / "new_key.pub"
         default_args.ssh_key = str(key_path)
         idrac_sushy.cmd_ensure_ssh_key(default_args)
         assert mock_run.call_count == 2
         keygen_call = mock_run.call_args_list[0][0][0]
         assert "ssh-keygen" in keygen_call
+        mock_forget_local.assert_called_once()
+        mock_forget_remote.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -491,13 +504,16 @@ class TestWaitInstall:
         assert "install-complete" in cmd
         assert mock_run.call_count == 1
 
+    @patch.object(idrac_sushy, "wait_for_api_ready", return_value=True)
     @patch.object(idrac_sushy, "run_cmd")
-    def test_wait_retries_on_failure(self, mock_run, default_args, tmp_path):
+    def test_wait_retries_on_failure(self, mock_run, mock_api, default_args, tmp_path):
         installer = tmp_path / "openshift-install"
         installer.touch()
         workdir = tmp_path / "workdir"
         (workdir / "auth").mkdir(parents=True)
-        (workdir / "auth" / "kubeconfig").write_text("kubeconfig\n")
+        (workdir / "auth" / "kubeconfig").write_text(
+            "apiVersion: v1\nclusters:\n- cluster:\n    server: https://192.168.1.133:6443\n"
+        )
         default_args.installer = str(installer)
         default_args.workdir = str(workdir)
         default_args.install_wait_attempts = 2
@@ -510,9 +526,12 @@ class TestWaitInstall:
             idrac_sushy.cmd_wait_install(default_args)
             mock_mco.assert_called_once()
         assert mock_run.call_count == 2
+        # post-failure + pre-retry
+        assert mock_api.call_count == 2
 
+    @patch.object(idrac_sushy, "wait_for_api_ready", return_value=True)
     @patch.object(idrac_sushy, "run_cmd")
-    def test_wait_raises_after_exhausting_attempts(self, mock_run, default_args, tmp_path):
+    def test_wait_raises_after_exhausting_attempts(self, mock_run, mock_api, default_args, tmp_path):
         installer = tmp_path / "openshift-install"
         installer.touch()
         default_args.installer = str(installer)
@@ -530,9 +549,10 @@ class TestWaitInstall:
         with pytest.raises(idrac_sushy.InstallerError, match="Installer not found"):
             idrac_sushy.cmd_wait_install(default_args)
 
+    @patch.object(idrac_sushy, "wait_for_api_ready", return_value=True)
     @patch.object(idrac_sushy, "cmd_wait_install")
     def test_maybe_remediate_runs_second_wait_round(
-        self, mock_inner, default_args, tmp_path,
+        self, mock_inner, mock_api, default_args, tmp_path,
     ):
         installer = tmp_path / "openshift-install"
         installer.touch()
@@ -552,6 +572,7 @@ class TestWaitInstall:
             idrac_sushy.cmd_wait_install_maybe_remediate(default_args)
             mock_mco.assert_called_once()
         assert mock_inner.call_count == 2
+        mock_api.assert_called_once()
 
     def test_maybe_remediate_no_kubeconfig_reraises(self, default_args, tmp_path):
         installer = tmp_path / "openshift-install"
@@ -563,6 +584,66 @@ class TestWaitInstall:
         with patch.object(idrac_sushy, "cmd_wait_install", side_effect=err):
             with pytest.raises(subprocess.CalledProcessError):
                 idrac_sushy.cmd_wait_install_maybe_remediate(default_args)
+
+
+class TestApiReadyGate:
+    def test_kubeconfig_api_server_parse(self, tmp_path):
+        kc = tmp_path / "kubeconfig"
+        kc.write_text(
+            "apiVersion: v1\nclusters:\n- cluster:\n"
+            "    server: https://api.sno.frntdeu1.pop.starlinkisp.net:6443\n"
+        )
+        assert (
+            idrac_sushy._kubeconfig_api_server(kc)
+            == "https://api.sno.frntdeu1.pop.starlinkisp.net:6443"
+        )
+
+    def test_install_log_suggests_api_outage(self, tmp_path):
+        workdir = tmp_path / "workdir"
+        workdir.mkdir()
+        (workdir / ".openshift_install.log").write_text(
+            'dial tcp 192.168.1.133:6443: connect: no route to host\n'
+        )
+        assert idrac_sushy._install_log_suggests_api_outage(workdir) is True
+        (workdir / ".openshift_install.log").write_text("all good\n")
+        assert idrac_sushy._install_log_suggests_api_outage(workdir) is False
+
+    def test_wait_for_api_ready_disabled(self, tmp_path, default_args):
+        default_args.api_ready_wait_sec = 0
+        kc = tmp_path / "kubeconfig"
+        kc.write_text("clusters:\n- cluster:\n    server: https://127.0.0.1:6443\n")
+        assert idrac_sushy.wait_for_api_ready(kc, args=default_args) is True
+
+    @patch.object(idrac_sushy, "_any_api_ready")
+    def test_wait_for_api_ready_stable_then_settle(self, mock_ready, tmp_path, default_args):
+        default_args.api_ready_wait_sec = 30
+        default_args.api_ready_poll_sec = 1
+        default_args.api_ready_settle_sec = 0
+        default_args.api_ready_stable_polls = 2
+        mock_ready.side_effect = [
+            (False, None),
+            (True, "https://192.168.1.133:6443"),
+            (True, "https://192.168.1.133:6443"),
+        ]
+        kc = tmp_path / "kubeconfig"
+        kc.write_text("clusters:\n- cluster:\n    server: https://192.168.1.133:6443\n")
+        with patch.object(idrac_sushy.time, "sleep") as mock_sleep:
+            assert idrac_sushy.wait_for_api_ready(kc, args=default_args) is True
+        assert mock_ready.call_count == 3
+        # one poll sleep after the miss; settle is 0
+        assert mock_sleep.call_count >= 1
+
+    @patch.object(idrac_sushy, "_any_api_ready", return_value=(False, None))
+    def test_wait_for_api_ready_timeout(self, mock_ready, tmp_path, default_args):
+        default_args.api_ready_wait_sec = 2
+        default_args.api_ready_poll_sec = 1
+        default_args.api_ready_settle_sec = 0
+        default_args.api_ready_stable_polls = 1
+        kc = tmp_path / "kubeconfig"
+        kc.write_text("clusters:\n- cluster:\n    server: https://192.168.1.133:6443\n")
+        with patch.object(idrac_sushy.time, "sleep"):
+            with patch.object(idrac_sushy.time, "monotonic", side_effect=[0, 0.5, 1.5, 2.5]):
+                assert idrac_sushy.wait_for_api_ready(kc, args=default_args) is False
 
 
 class TestMcRemediation:

@@ -20,6 +20,25 @@ on:
         required: false
         default: "3"
         type: string
+      api_ready_wait_sec:
+        description: >
+          API_READY_WAIT_SEC — max seconds to wait for kube-apiserver /readyz between install-complete
+          retries (SNO MCO reboot: no route to host / connection refused). 0 disables.
+        required: false
+        default: "1800"
+        type: string
+      api_ready_settle_sec:
+        description: >
+          API_READY_SETTLE_SEC — settle time after /readyz is stably ok before restarting wait-for
+          (avoids burning the ~40m cluster-init window during post-reboot flap).
+        required: false
+        default: "90"
+        type: string
+      api_ready_stable_polls:
+        description: "API_READY_STABLE_POLLS — consecutive successful /readyz polls required"
+        required: false
+        default: "3"
+        type: string
       post_copy_iso_sleep_sec:
         description: "POST_COPY_ISO_SLEEP_SEC — seconds after SCP so webcache/storage can expose the full ISO"
         required: false
@@ -54,16 +73,21 @@ env:
   KUBECONFIG_PATH: ${{ github.workspace }}/workdir/auth/kubeconfig
   INSTALL_WAIT_ATTEMPTS: ${{ inputs.install_wait_attempts }}
   REMEDIATION_INSTALL_WAIT_ATTEMPTS: ${{ inputs.remediation_install_wait_attempts }}
+  API_READY_WAIT_SEC: ${{ inputs.api_ready_wait_sec }}
+  API_READY_SETTLE_SEC: ${{ inputs.api_ready_settle_sec }}
+  API_READY_STABLE_POLLS: ${{ inputs.api_ready_stable_polls }}
+  API_READY_POLL_SEC: "15"
   POST_COPY_ISO_SLEEP_SEC: ${{ inputs.post_copy_iso_sleep_sec }}
   IDRAC_DEPLOY_AFTER_INSERT_SEC: ${{ inputs.idrac_deploy_after_insert_sec }}
   IDRAC_DEPLOY_BEFORE_RESTART_SEC: ${{ inputs.idrac_deploy_before_restart_sec }}
   IDRAC_DEPLOY_AFTER_RESTART_SEC: ${{ inputs.idrac_deploy_after_restart_sec }}
   ISO_HTTP_PROBE: ${{ inputs.iso_http_probe }}
+  CLUSTER_IP: "192.168.1.133"
 
 jobs:
   install:
     runs-on: self-hosted
-    # Long installs: ISO + iDRAC + bootstrap + primary waits + remediation waits
+    # Long installs: ISO + iDRAC + bootstrap + primary waits + API-ready gates + remediation waits
     timeout-minutes: 720
     steps:
       - name: Checkout
@@ -79,6 +103,10 @@ jobs:
           export PATH="$PWD/.venv/bin:$PATH"
           export INSTALL_WAIT_ATTEMPTS="${{ inputs.install_wait_attempts }}"
           export REMEDIATION_INSTALL_WAIT_ATTEMPTS="${{ inputs.remediation_install_wait_attempts }}"
+          export API_READY_WAIT_SEC="${{ inputs.api_ready_wait_sec }}"
+          export API_READY_SETTLE_SEC="${{ inputs.api_ready_settle_sec }}"
+          export API_READY_STABLE_POLLS="${{ inputs.api_ready_stable_polls }}"
+          export API_READY_POLL_SEC="${API_READY_POLL_SEC:-15}"
           make install \
             OCP_VERSION="${{ inputs.ocp_version }}" \
             IDRAC_IP="192.168.1.228" \
@@ -96,8 +124,47 @@ jobs:
           path: abi-install-diagnostics/
           retention-days: 7
 
+      - name: Wait for API before Day-2
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/.venv/bin:$PATH"
+          # Reuse the same readiness gate as install retries (handles late MCO reboot).
+          python3 - <<'PY'
+          import idrac_sushy
+          from types import SimpleNamespace
+          args = SimpleNamespace(
+              api_ready_wait_sec=None,
+              api_ready_poll_sec=None,
+              api_ready_settle_sec=None,
+              api_ready_stable_polls=None,
+              cluster_ip="192.168.1.133",
+          )
+          ok = idrac_sushy.wait_for_api_ready(
+              "workdir/auth/kubeconfig",
+              workdir="workdir",
+              args=args,
+              label="API (pre Day-2)",
+          )
+          raise SystemExit(0 if ok else 1)
+          PY
+
       - name: Wait for Cluster Operators
-        run: oc --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available clusteroperators --all --timeout=1800s
+        run: |
+          set -euo pipefail
+          # Retry oc wait across transient API flaps (SNO reboot / apiserver restart).
+          attempts=6
+          for i in $(seq 1 "$attempts"); do
+            echo "oc wait clusteroperators (attempt $i/$attempts) ..."
+            if oc --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available \
+                clusteroperators --all --timeout=1800s; then
+              exit 0
+            fi
+            echo "oc wait failed; probing API before retry ..."
+            curl -sk --connect-timeout 5 -m 10 -o /dev/null \
+              "https://${CLUSTER_IP}:6443/readyz" || true
+            sleep 30
+          done
+          exit 1
 
       # Idempotent: subscriptions/namespaces may already exist on workflow retry.
       - name: Apply operator-install manifests

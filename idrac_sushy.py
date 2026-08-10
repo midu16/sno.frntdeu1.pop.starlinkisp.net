@@ -27,6 +27,11 @@ Subcommands:
   wait-install       Wait for openshift-install agent install-complete
   remediate-mco      Fix stuck machine-config (annotations, CSRs, MCD restart)
   install            Full end-to-end SNO installation (all steps above)
+
+API readiness: between install-complete retries the installer waits for kube-apiserver
+/readyz (env API_READY_WAIT_SEC / API_READY_SETTLE_SEC) so SNO MCO reboots that
+produce "no route to host" / "connection refused" do not immediately burn another
+~40m wait-for window.
 """
 
 import argparse
@@ -36,12 +41,16 @@ import json
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from subprocess import CalledProcessError
+from urllib.parse import urlparse
 
 SEPARATOR = "=" * 92
 
@@ -55,9 +64,24 @@ DEFAULTS = {
     "remote_user": "rock",
     "remote_host": "192.168.1.21",
     "remote_path": "/apps/webcache/OSs/",
+    # SNO node / rendezvous IP — used for API readiness probes when kubeconfig is absent
+    "cluster_ip": "192.168.1.133",
     "ssh_key": str(Path.home() / ".ssh" / "id_ed25519.pub"),
     "registry_auth": str(Path.home() / ".docker" / "config.json"),
 }
+
+_API_SERVER_RE = re.compile(r"(?m)^\s*server:\s*(\S+)\s*$")
+_RENDEZVOUS_IP_RE = re.compile(r"(?m)^\s*rendezvousIP:\s*(\S+)\s*$")
+_API_OUTAGE_MARKERS = (
+    "no route to host",
+    "connection refused",
+    "i/o timeout",
+    "network is unreachable",
+    "connection reset by peer",
+    "tls: internal error",
+    "server is currently unable to handle the request",
+    "dial tcp",
+)
 
 
 def _default_install_wait_attempts():
@@ -104,6 +128,207 @@ def _mc_remediation_wait_sec(args) -> int:
         return max(0, int(raw))
     except ValueError:
         return 120
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def _api_ready_wait_sec(args=None) -> int:
+    if args is not None:
+        v = getattr(args, "api_ready_wait_sec", None)
+        if v is not None:
+            return max(0, int(v))
+    # SNO MCO reboot + kube-apiserver bring-up often needs 10–20+ minutes.
+    return _env_int("API_READY_WAIT_SEC", 1800)
+
+
+def _api_ready_poll_sec(args=None) -> int:
+    if args is not None:
+        v = getattr(args, "api_ready_poll_sec", None)
+        if v is not None:
+            return max(1, int(v))
+    return _env_int("API_READY_POLL_SEC", 15, minimum=1)
+
+
+def _api_ready_settle_sec(args=None) -> int:
+    if args is not None:
+        v = getattr(args, "api_ready_settle_sec", None)
+        if v is not None:
+            return max(0, int(v))
+    # After readyz flips to ok, give control-plane a short settle before
+    # restarting openshift-install's ~40m cluster-init timer.
+    return _env_int("API_READY_SETTLE_SEC", 90)
+
+
+def _api_ready_stable_polls(args=None) -> int:
+    if args is not None:
+        v = getattr(args, "api_ready_stable_polls", None)
+        if v is not None:
+            return max(1, int(v))
+    return _env_int("API_READY_STABLE_POLLS", 3, minimum=1)
+
+
+def _kubeconfig_api_server(kubeconfig_path) -> str | None:
+    path = Path(kubeconfig_path)
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _API_SERVER_RE.search(text)
+    if not match:
+        return None
+    return match.group(1).rstrip("/")
+
+
+def _rendezvous_ip_from_workdir(workdir) -> str | None:
+    agent = Path(workdir) / "agent-config.yaml"
+    if not agent.is_file():
+        return None
+    try:
+        text = agent.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _RENDEZVOUS_IP_RE.search(text)
+    if not match:
+        return None
+    return match.group(1).strip().strip("\"'")
+
+
+def _api_probe_targets(kubeconfig_path, workdir=None, args=None) -> list[str]:
+    """HTTPS API base URLs to probe (kubeconfig server first, then node IP)."""
+    targets = []
+    server = _kubeconfig_api_server(kubeconfig_path)
+    if server:
+        targets.append(server)
+    cluster_ip = None
+    if workdir:
+        cluster_ip = _rendezvous_ip_from_workdir(workdir)
+    if not cluster_ip and args is not None:
+        cluster_ip = getattr(args, "cluster_ip", None) or DEFAULTS.get("cluster_ip")
+    if not cluster_ip:
+        cluster_ip = DEFAULTS.get("cluster_ip")
+    if cluster_ip:
+        ip_url = f"https://{cluster_ip}:6443"
+        if ip_url not in targets:
+            targets.append(ip_url)
+    return targets
+
+
+def _tcp_connect_ok(host: str, port: int, timeout: float = 5.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _api_readyz_ok(server_url: str, timeout: float = 10.0) -> bool:
+    """Return True when kube-apiserver /readyz responds OK (TLS verify skipped)."""
+    url = server_url.rstrip("/") + "/readyz"
+    ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(url, context=ctx, timeout=timeout) as resp:
+            code = getattr(resp, "status", resp.getcode())
+            body = resp.read().decode("utf-8", errors="replace").strip().lower()
+            return code == 200 and (body == "ok" or body.startswith("ok"))
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+        return False
+
+
+def _any_api_ready(targets: list[str]) -> tuple[bool, str | None]:
+    for target in targets:
+        parsed = urlparse(target)
+        host = parsed.hostname
+        port = parsed.port or 6443
+        if host and not _tcp_connect_ok(host, port):
+            continue
+        if _api_readyz_ok(target):
+            return True, target
+    return False, None
+
+
+def _install_log_suggests_api_outage(workdir) -> bool:
+    log = Path(workdir) / ".openshift_install.log"
+    if not log.is_file():
+        return False
+    try:
+        # Tail last ~64KiB — enough for recent reflector / dial errors.
+        with log.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 65536), os.SEEK_SET)
+            tail = fh.read().decode("utf-8", errors="replace").lower()
+    except OSError:
+        return False
+    return any(marker in tail for marker in _API_OUTAGE_MARKERS)
+
+
+def wait_for_api_ready(kubeconfig_path, workdir=None, args=None, *, label="API") -> bool:
+    """Block until kube-apiserver /readyz is stably reachable.
+
+    Used between install-complete retries so a SNO MCO reboot (no route to host /
+    connection refused) does not immediately burn another ~40m wait-for window.
+
+    Returns True if ready (or wait disabled); False if timeout exhausted.
+    """
+    timeout = _api_ready_wait_sec(args)
+    if timeout <= 0:
+        print(f"  Skipping {label} readiness wait (API_READY_WAIT_SEC=0).", flush=True)
+        return True
+
+    poll = _api_ready_poll_sec(args)
+    settle = _api_ready_settle_sec(args)
+    stable_needed = _api_ready_stable_polls(args)
+    targets = _api_probe_targets(kubeconfig_path, workdir=workdir, args=args)
+    if not targets:
+        print(f"  WARNING: no {label} probe targets; skipping readiness wait.", flush=True)
+        return True
+
+    print(
+        f"Waiting up to {timeout}s for {label} readiness "
+        f"(poll={poll}s settle={settle}s stable={stable_needed}; targets={', '.join(targets)}) ...",
+        flush=True,
+    )
+    deadline = time.monotonic() + timeout
+    stable = 0
+    last_ok = None
+    while time.monotonic() < deadline:
+        ok, which = _any_api_ready(targets)
+        if ok:
+            stable += 1
+            last_ok = which
+            print(f"  [{stable}/{stable_needed}] {label} ready via {which}", flush=True)
+            if stable >= stable_needed:
+                if settle > 0:
+                    print(
+                        f"  {label} stable; settling {settle}s before continuing "
+                        "(avoids restarting wait-for during post-reboot flap) ...",
+                        flush=True,
+                    )
+                    time.sleep(settle)
+                print(f"  {label} readiness gate passed ({last_ok}).", flush=True)
+                return True
+        else:
+            if stable:
+                print(
+                    f"  {label} became unreachable again after {stable} ok poll(s); "
+                    "resetting stability counter (likely node reboot / apiserver restart).",
+                    flush=True,
+                )
+            stable = 0
+            remaining = int(max(0, deadline - time.monotonic()))
+            print(f"  {label} not ready yet ({remaining}s left) ...", flush=True)
+        time.sleep(poll)
+
+    print(f"  WARNING: timed out waiting for {label} readiness.", flush=True)
+    return False
 
 
 _MCO_NS = "openshift-machine-config-operator"
@@ -836,6 +1061,50 @@ def cmd_ensure_ssh_key(args):
     ])
     print("  SSH key copied.")
 
+    # Reinstalls rotate the SNO host key; drop stale known_hosts entries so
+    # post-failure diagnostics (SSH from webcache → node) keep working.
+    cluster_ip = _attr(args, "cluster_ip") or DEFAULTS.get("cluster_ip")
+    if cluster_ip:
+        _forget_ssh_host_key(cluster_ip)
+        _forget_remote_ssh_host_key(remote_user, remote_host, cluster_ip)
+
+
+def _forget_ssh_host_key(host: str) -> None:
+    known = Path.home() / ".ssh" / "known_hosts"
+    if not known.is_file():
+        return
+    print(f"Removing stale local known_hosts entry for {host} ...")
+    subprocess.run(
+        ["ssh-keygen", "-f", str(known), "-R", host],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _forget_remote_ssh_host_key(remote_user: str, remote_host: str, host: str) -> None:
+    print(f"Removing stale known_hosts entry for {host} on {remote_user}@{remote_host} ...")
+    result = subprocess.run(
+        [
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes",
+            f"{remote_user}@{remote_host}",
+            f"ssh-keygen -R {host} >/dev/null 2>&1 || true",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"  WARNING: could not clear remote known_hosts for {host} "
+            f"(exit {result.returncode}); diagnostics SSH may warn on host-key change.",
+            flush=True,
+        )
+    else:
+        print(f"  Cleared {host} from {remote_host} known_hosts.")
+
 
 # ---------------------------------------------------------------------------
 # Extract openshift-install
@@ -1223,6 +1492,15 @@ def cmd_wait_install(args):
 
     cmd = [installer, "agent", "wait-for", "install-complete", "--dir", workdir]
     for attempt in range(1, attempts + 1):
+        # On retries, wait until API is stably up so we do not restart the
+        # installer's ~40m cluster-init window while the SNO node is rebooting.
+        if attempt > 1 and kubeconfig.is_file():
+            wait_for_api_ready(
+                kubeconfig,
+                workdir=workdir,
+                args=args,
+                label="API (pre-retry)",
+            )
         print(f"Waiting for install-complete (attempt {attempt}/{attempts}) ...")
         try:
             run_cmd(cmd)
@@ -1231,7 +1509,22 @@ def cmd_wait_install(args):
         except CalledProcessError as e:
             if attempt >= attempts:
                 raise
+            outage = _install_log_suggests_api_outage(workdir)
+            if outage:
+                print(
+                    "Install wait failed while installer logs show API connectivity "
+                    "loss (no route to host / connection refused / similar). "
+                    "This is common during SNO MachineConfig reboot; waiting for "
+                    "API recovery before retry ...",
+                    flush=True,
+                )
             if kubeconfig.is_file():
+                wait_for_api_ready(
+                    kubeconfig,
+                    workdir=workdir,
+                    args=args,
+                    label="API (post-failure)",
+                )
                 maybe_remediate_machine_config(kubeconfig, args)
             print(
                 f"Install wait exited {e.returncode} (openshift-install allows ~90m per attempt). "
@@ -1246,6 +1539,7 @@ def cmd_remediate_mco(args):
     if not kubeconfig.is_file():
         raise InstallerError(f"Kubeconfig not found: {kubeconfig}")
     os.environ["KUBECONFIG"] = str(kubeconfig)
+    wait_for_api_ready(kubeconfig, workdir=_attr(args, "workdir"), args=args, label="API")
     if not maybe_remediate_machine_config(kubeconfig, args):
         print("No machine-config remediation was needed or possible.")
 
@@ -1254,13 +1548,25 @@ def cmd_wait_install_maybe_remediate(args):
     """Run install-complete waits; if they fail but kubeconfig exists, remediate MCO/CSRs
     and run extra wait rounds.
     """
-    kubeconfig = Path(_attr(args, "workdir")).resolve() / "auth" / "kubeconfig"
+    workdir = _attr(args, "workdir")
+    kubeconfig = Path(workdir).resolve() / "auth" / "kubeconfig"
     try:
         cmd_wait_install(args)
     except CalledProcessError:
         remediation = _remediation_install_attempts(args)
         if remediation < 1 or not kubeconfig.is_file():
             raise
+        print(SEPARATOR)
+        print(
+            "[Remediation] Primary install-complete waits failed; "
+            "waiting for API readiness before MCO remediation / extra waits."
+        )
+        wait_for_api_ready(
+            kubeconfig,
+            workdir=workdir,
+            args=args,
+            label="API (remediation)",
+        )
         maybe_remediate_machine_config(kubeconfig, args)
         print(SEPARATOR)
         print(
@@ -1344,6 +1650,9 @@ def build_parser():
                         help="Webcache host IP/hostname")
     parser.add_argument("--remote-path", dest="remote_path", default=DEFAULTS["remote_path"],
                         help="Webcache host ISO destination path")
+    parser.add_argument("--cluster-ip", dest="cluster_ip", default=DEFAULTS["cluster_ip"],
+                        help="SNO node / rendezvous IP for API readiness probes "
+                        f"(default: {DEFAULTS['cluster_ip']})")
     parser.add_argument("--ssh-key", dest="ssh_key", default=DEFAULTS["ssh_key"],
                         help="Path to SSH public key")
     parser.add_argument("--registry-auth", dest="registry_auth", default=DEFAULTS["registry_auth"],
@@ -1389,12 +1698,14 @@ def build_parser():
         "Default: env INSTALL_WAIT_ATTEMPTS or 2.",
     )
     _add_mc_remediation_args(p_wi)
+    _add_api_ready_args(p_wi)
 
     p_mco = sub.add_parser(
         "remediate-mco",
         help="Remediate stuck machine-config (annotations, CSRs, MCD restart)",
     )
     _add_mc_remediation_args(p_mco)
+    _add_api_ready_args(p_mco)
 
     p_full = sub.add_parser("install", help="Full end-to-end SNO OpenShift installation")
     p_full.add_argument("--iso-url", dest="iso_url", default=None,
@@ -1419,6 +1730,7 @@ def build_parser():
         "Default: env REMEDIATION_INSTALL_WAIT_ATTEMPTS or 0 (off).",
     )
     _add_mc_remediation_args(p_full)
+    _add_api_ready_args(p_full)
 
     return parser
 
@@ -1439,6 +1751,46 @@ def _add_mc_remediation_args(parser):
         metavar="SEC",
         help="Seconds to wait for machine-config recovery after remediation. "
         "Default: env MC_REMEDIATION_WAIT_SEC or 120.",
+    )
+
+
+def _add_api_ready_args(parser):
+    parser.add_argument(
+        "--api-ready-wait-sec",
+        dest="api_ready_wait_sec",
+        type=int,
+        default=None,
+        metavar="SEC",
+        help="Max seconds to wait for kube-apiserver /readyz between install-complete "
+        "retries (SNO reboot / no-route-to-host). Default: env API_READY_WAIT_SEC or 1800. "
+        "Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--api-ready-poll-sec",
+        dest="api_ready_poll_sec",
+        type=int,
+        default=None,
+        metavar="SEC",
+        help="Seconds between API readiness probes. "
+        "Default: env API_READY_POLL_SEC or 15.",
+    )
+    parser.add_argument(
+        "--api-ready-settle-sec",
+        dest="api_ready_settle_sec",
+        type=int,
+        default=None,
+        metavar="SEC",
+        help="Seconds to settle after API is stably ready before retrying wait-for. "
+        "Default: env API_READY_SETTLE_SEC or 90.",
+    )
+    parser.add_argument(
+        "--api-ready-stable-polls",
+        dest="api_ready_stable_polls",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Consecutive successful /readyz polls required before settle. "
+        "Default: env API_READY_STABLE_POLLS or 3.",
     )
 
 

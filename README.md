@@ -66,7 +66,7 @@ make install
 make install OCP_VERSION=4.19.23
 ```
 
-The install workflow: preflight → ensure SSH key → extract `openshift-install` → prepare configs → build agent ISO → copy ISO to webcache host → iDRAC deploy (eject, insert, set boot to VirtualCD, restart, wait for power on) → wait for install-complete (with optional **remediation**: if those waits exhaust but `workdir/auth/kubeconfig` exists, more `wait-for install-complete` rounds — env `REMEDIATION_INSTALL_WAIT_ATTEMPTS`, default `0` offline; the GitHub workflow defaults it to `3`).
+The install workflow: preflight → ensure SSH key → extract `openshift-install` → prepare configs → build agent ISO → copy ISO to webcache host → iDRAC deploy (eject, insert, set boot to VirtualCD, restart, wait for power on) → wait for install-complete (with **API readiness gates** between retries so SNO MachineConfig reboots that produce `no route to host` / `connection refused` do not immediately burn another ~40m wait-for window — env `API_READY_WAIT_SEC` / `API_READY_SETTLE_SEC`; and optional **remediation**: if those waits exhaust but `workdir/auth/kubeconfig` exists, more `wait-for install-complete` rounds — env `REMEDIATION_INSTALL_WAIT_ATTEMPTS`, default `0` offline; the GitHub workflow defaults it to `3`).
 
 ## Configuration
 

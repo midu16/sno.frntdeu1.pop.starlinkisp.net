@@ -35,7 +35,8 @@ def default_args():
         workdir="./workdir",
         src_dir="./abi-master-0",
         installer="./openshift-install",
-        ocp_version="4.22.0-ec.3",
+        ocp_version="5.0.0-ec.6",
+        release_image=None,
         remote_user="rock",
         remote_host="192.168.1.21",
         remote_path="/apps/webcache/OSs/",
@@ -392,6 +393,36 @@ class TestExtractInstaller:
         assert "oc" in first_call
         assert "release" in first_call
         assert "info" in first_call
+
+    def test_release_image_from_version(self, default_args, monkeypatch):
+        monkeypatch.delenv("RELEASE_IMAGE", raising=False)
+        default_args.ocp_version = "5.0.0-ec.6"
+        default_args.release_image = None
+        assert idrac_sushy._resolve_release_image(default_args) == (
+            "quay.io/openshift-release-dev/ocp-release:5.0.0-ec.6-x86_64"
+        )
+
+    def test_release_image_override_wins(self, default_args):
+        default_args.ocp_version = "5.0.0-ec.6"
+        default_args.release_image = "registry.example.com/ocp-release:custom-x86_64"
+        assert idrac_sushy._resolve_release_image(default_args) == (
+            "registry.example.com/ocp-release:custom-x86_64"
+        )
+
+    def test_release_image_env_override(self, default_args, monkeypatch):
+        monkeypatch.setenv("RELEASE_IMAGE", "registry.example.com/env-image:tag")
+        default_args.ocp_version = "5.0.0-ec.6"
+        default_args.release_image = None
+        assert idrac_sushy._resolve_release_image(default_args) == (
+            "registry.example.com/env-image:tag"
+        )
+
+    def test_invalid_version_rejected(self, default_args, monkeypatch):
+        monkeypatch.delenv("RELEASE_IMAGE", raising=False)
+        default_args.ocp_version = "not-a-version"
+        default_args.release_image = None
+        with pytest.raises(idrac_sushy.InstallerError, match="Invalid OCP version"):
+            idrac_sushy._resolve_release_image(default_args)
 
     @patch.object(idrac_sushy, "run_cmd")
     def test_no_digest_fails(self, mock_run, default_args, registry_auth_file):

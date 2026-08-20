@@ -58,7 +58,7 @@ DEFAULTS = {
     "workdir": "./workdir",
     "src_dir": "./abi-master-0",
     "installer": "./openshift-install",
-    "ocp_version": "4.22.0-ec.3",
+    "ocp_version": "5.0.0-ec.6",
     "idrac_ip": "192.168.1.228",
     "idrac_user": "root",
     "remote_user": "rock",
@@ -69,6 +69,10 @@ DEFAULTS = {
     "ssh_key": str(Path.home() / ".ssh" / "id_ed25519.pub"),
     "registry_auth": str(Path.home() / ".docker" / "config.json"),
 }
+
+# X.Y.Z with an optional pre-release suffix (ec = engineering candidate,
+# fc/rc = feature/release candidate), e.g. 5.0.0-ec.6, 4.22.0-ec.3, 4.18.6.
+_OCP_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-(?:ec|fc|rc)\.\d+)?$")
 
 _API_SERVER_RE = re.compile(r"(?m)^\s*server:\s*(\S+)\s*$")
 _RENDEZVOUS_IP_RE = re.compile(r"(?m)^\s*rendezvousIP:\s*(\S+)\s*$")
@@ -1110,14 +1114,35 @@ def _forget_remote_ssh_host_key(remote_user: str, remote_host: str, host: str) -
 # Extract openshift-install
 # ---------------------------------------------------------------------------
 
-def cmd_extract_installer(args):
+def _resolve_release_image(args) -> str:
+    """Return the release image to extract openshift-install from.
+
+    An explicit override (--release-image / RELEASE_IMAGE) wins and is used as-is,
+    which allows pre-GA / mirrored / CI images that do not follow the public quay
+    tag pattern. Otherwise the image is built from the (validated) OCP version, e.g.
+    5.0.0-ec.6 -> quay.io/openshift-release-dev/ocp-release:5.0.0-ec.6-x86_64.
+    """
+    override = getattr(args, "release_image", None) or os.environ.get("RELEASE_IMAGE")
+    if override:
+        return override.strip()
+
     ocp_version = _attr(args, "ocp_version")
+    if not _OCP_VERSION_RE.match(str(ocp_version)):
+        raise InstallerError(
+            f"Invalid OCP version {ocp_version!r}: expected X.Y.Z with an optional "
+            "-ec.N / -fc.N / -rc.N suffix (e.g. 5.0.0-ec.6, 4.18.6). "
+            "For a non-standard image use --release-image / RELEASE_IMAGE."
+        )
+    return f"quay.io/openshift-release-dev/ocp-release:{ocp_version}-x86_64"
+
+
+def cmd_extract_installer(args):
     registry_auth = _attr(args, "registry_auth")
 
     if not Path(registry_auth).exists():
         raise InstallerError(f"Registry auth not found: {registry_auth}")
 
-    release_image = f"quay.io/openshift-release-dev/ocp-release:{ocp_version}-x86_64"
+    release_image = _resolve_release_image(args)
     print(f"Getting release digest for {release_image} ...")
 
     result = run_cmd(
@@ -1641,7 +1666,13 @@ def build_parser():
     parser.add_argument("--src-dir", dest="src_dir", default=DEFAULTS["src_dir"],
                         help="Source config directory (install-config, agent-config)")
     parser.add_argument("--ocp-version", dest="ocp_version", default=DEFAULTS["ocp_version"],
-                        help="OpenShift version to install")
+                        help="OpenShift version to install (X.Y.Z[-ec.N/-fc.N/-rc.N], "
+                        f"e.g. 5.0.0-ec.6; default: {DEFAULTS['ocp_version']})")
+    parser.add_argument("--release-image", dest="release_image",
+                        default=os.environ.get("RELEASE_IMAGE"),
+                        help="Full release image pullspec to extract openshift-install from "
+                        "(overrides --ocp-version; env: RELEASE_IMAGE). Use for pre-GA, "
+                        "mirrored, or CI images that do not follow the public quay tag pattern.")
     parser.add_argument("--installer", default=DEFAULTS["installer"],
                         help="Path to openshift-install binary")
     parser.add_argument("--remote-user", dest="remote_user", default=DEFAULTS["remote_user"],

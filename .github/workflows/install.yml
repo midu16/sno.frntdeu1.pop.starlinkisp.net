@@ -4,9 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       ocp_version:
-        description: "OpenShift version to install (e.g. 4.22.0-ec.3, 4.18.6)"
+        description: "OpenShift version to install (e.g. 5.0.0-ec.6, 4.22.0-ec.3, 4.18.6)"
         required: true
-        default: "4.22.0-ec.3"
+        default: "5.0.0-ec.6"
+        type: string
+      release_image:
+        description: >
+          RELEASE_IMAGE — full release image pullspec to extract openshift-install from.
+          Overrides ocp_version; use for pre-GA / mirrored / CI images that do not follow
+          the public quay tag pattern. Leave empty to build the image from ocp_version.
+        required: false
+        default: ""
         type: string
       install_wait_attempts:
         description: "INSTALL_WAIT_ATTEMPTS — openshift-install retries per invocation (~90 min each)"
@@ -82,6 +90,7 @@ env:
   IDRAC_DEPLOY_BEFORE_RESTART_SEC: ${{ inputs.idrac_deploy_before_restart_sec }}
   IDRAC_DEPLOY_AFTER_RESTART_SEC: ${{ inputs.idrac_deploy_after_restart_sec }}
   ISO_HTTP_PROBE: ${{ inputs.iso_http_probe }}
+  RELEASE_IMAGE: ${{ inputs.release_image }}
   CLUSTER_IP: "192.168.1.133"
 
 jobs:
@@ -107,8 +116,10 @@ jobs:
           export API_READY_SETTLE_SEC="${{ inputs.api_ready_settle_sec }}"
           export API_READY_STABLE_POLLS="${{ inputs.api_ready_stable_polls }}"
           export API_READY_POLL_SEC="${API_READY_POLL_SEC:-15}"
+          export RELEASE_IMAGE="${{ inputs.release_image }}"
           make install \
             OCP_VERSION="${{ inputs.ocp_version }}" \
+            RELEASE_IMAGE="${{ inputs.release_image }}" \
             IDRAC_IP="192.168.1.228" \
             IDRAC_USER="root" \
             IDRAC_PW="${{ secrets.IDRAC_PW }}"

@@ -21,6 +21,8 @@ export API_READY_STABLE_POLLS
 export SKIP_MC_REMEDIATION
 export MC_REMEDIATION_WAIT_SEC
 export FIX_WORKLOAD_PINNING
+# Optional: override the release image pullspec (pre-GA / mirrored / CI images)
+export RELEASE_IMAGE
 # Optional: copy-iso / iDRAC deploy pacing (see idrac_sushy.py)
 export POST_COPY_ISO_SLEEP_SEC
 export ISO_HTTP_PROBE
@@ -30,6 +32,9 @@ export IDRAC_DEPLOY_BEFORE_RESTART_SEC
 export IDRAC_DEPLOY_AFTER_RESTART_SEC
 OCP_VERSION ?=
 OCP_FLAG     = $(if $(OCP_VERSION),--ocp-version $(OCP_VERSION),)
+# Optional: override the release image pullspec (pre-GA / mirrored / CI images)
+RELEASE_IMAGE ?=
+RELEASE_FLAG  = $(if $(RELEASE_IMAGE),--release-image $(RELEASE_IMAGE),)
 
 .DEFAULT_GOAL := help
 
@@ -89,11 +94,13 @@ help:
 	@echo "    POST_COPY_ISO_SLEEP_SEC     Wait after scp before iDRAC (default: 0)"
 	@echo "    ISO_HTTP_PROBE              1/true: range-GET ISO URL after copy (default: off)"
 	@echo "    IDRAC_DEPLOY_*_SEC          Deploy pacing (defaults in idrac_sushy.cmd_deploy)"
-	@echo "    OCP_VERSION        OpenShift version (default: 4.22.0-ec.3)"
+	@echo "    OCP_VERSION        OpenShift version (default: 5.0.0-ec.6)"
+	@echo "    RELEASE_IMAGE      Override release image pullspec (pre-GA/mirrored/CI images)"
 	@echo ""
 	@echo "  Examples"
-	@echo "    make install IDRAC_PW='pass' OCP_VERSION=4.18.6"
-	@echo "    make extract-installer OCP_VERSION=4.17.0"
+	@echo "    make install IDRAC_PW='pass' OCP_VERSION=5.0.0-ec.6"
+	@echo "    make extract-installer OCP_VERSION=4.18.6"
+	@echo "    make install RELEASE_IMAGE=registry.example.com/ocp-release:5.0.0-ec.6-x86_64"
 	@echo "    make status IDRAC_PW='pass'"
 	@echo ""
 
@@ -123,7 +130,7 @@ clean:
 # ---- Full workflow -----------------------------------------------------------
 
 install:
-	$(PYTHON) $(SCRIPT) $(OCP_FLAG) install
+	$(PYTHON) $(SCRIPT) $(OCP_FLAG) $(RELEASE_FLAG) install
 
 # ---- Individual steps --------------------------------------------------------
 
@@ -134,7 +141,7 @@ ssh-key:
 	$(PYTHON) $(SCRIPT) ensure-ssh-key
 
 extract-installer:
-	$(PYTHON) $(SCRIPT) $(OCP_FLAG) extract-installer
+	$(PYTHON) $(SCRIPT) $(OCP_FLAG) $(RELEASE_FLAG) extract-installer
 
 prepare-configs:
 	$(PYTHON) $(SCRIPT) prepare-configs

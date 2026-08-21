@@ -38,9 +38,9 @@ metadata:
   namespace: openshift-workload-availability
   annotations:
       olm.providedAPIs: SelfNodeRemediation.v1alpha1.self-node-remediation.medik8s.io,SelfNodeRemediationConfig.v1alpha1.self-node-remediation.medik8s.io,SelfNodeRemediationTemplate.v1alpha1.self-node-remediation.medik8s.io
-# Omit targetNamespaces so the OperatorGroup watches all namespaces (AllNamespaces install mode).
-# rhods-operator does not support OwnNamespace (watching only redhat-ods-operator).
+# Omit targetNamespaces so the OperatorGroup watches all namespaces
+# (AllNamespaces install mode). self-node-remediation only supports
+# AllNamespaces (OwnNamespace / SingleNamespace are unsupported).
 spec:
   upgradeStrategy: Default
-
 

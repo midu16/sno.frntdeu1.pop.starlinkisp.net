@@ -4,7 +4,10 @@
 1. ConfigMaps (no CRDs).
 2. If Machine Config is degraded (e.g. missing ``currentconfig``, master pool
    not ready), restart MCD pods on affected nodes and wait for recovery.
-3. Approve cluster-wide InstallPlans still pending (Manual approval).
+3. Wait for Manual-approval InstallPlans (OLM creates them after Subscriptions),
+   then approve all pending InstallPlans. Re-approve during CSV waits so late
+   InstallPlans are not left unapproved (race with ``oc apply`` of
+   operator-install).
 4. Wait for LVMS and SR-IOV ClusterServiceVersions (phase Succeeded).
 5. Wait for LVMS CRD, apply LVMCluster.
 6. Wait for SR-IOV CRDs, apply Sriov resources.
@@ -403,69 +406,146 @@ def _maybe_remediate_machine_config(
     )
 
 
-def _iter_namespace_names(core_v1: client.CoreV1Api) -> list[str]:
-    names: list[str] = []
-    continue_token: str | None = None
-    while True:
-        kwargs: dict[str, Any] = {"limit": 500, "_request_timeout": _rt()}
-        if continue_token:
-            kwargs["_continue"] = continue_token
-        resp = core_v1.list_namespace(**kwargs)
-        for ns in resp.items or []:
-            if ns.metadata and ns.metadata.name:
-                names.append(ns.metadata.name)
-        continue_token = resp.metadata._continue if resp.metadata else None
-        if not continue_token:
-            break
-    return names
+# Subscriptions that must have an InstallPlan before we proceed to CSV waits.
+# Without this gate, approval can run before OLM creates Manual InstallPlans
+# and then wait forever for CSVs that never install.
+_REQUIRED_INSTALLPLAN_SUBSCRIPTIONS: tuple[tuple[str, str], ...] = (
+    ("openshift-storage", "lvms-operator"),
+    ("openshift-sriov-network-operator", "sriov-network-operator"),
+)
+
+
+def _list_all_installplans(
+    custom: client.CustomObjectsApi,
+) -> list[dict[str, Any]]:
+    """Cluster-scoped list of InstallPlans (all namespaces)."""
+    try:
+        data = custom.list_cluster_custom_object(
+            group=_OLM_GROUP,
+            version=_OLM_VERSION,
+            plural=_PLURAL_INSTALLPLAN,
+            _request_timeout=_rt(),
+        )
+    except ApiException as e:
+        raise OperatorConfigError(
+            f"list installplans (cluster) failed: {e.reason or e}"
+        ) from e
+    if not isinstance(data, dict):
+        return []
+    items = data.get("items", [])
+    return [i for i in items if isinstance(i, dict)]
 
 
 def _list_unapproved_installplans(
     custom: client.CustomObjectsApi,
-    core_v1: client.CoreV1Api,
+    core_v1: client.CoreV1Api | None = None,
 ) -> list[tuple[str, str]]:
     """Return (namespace, name) for InstallPlans with approved == false."""
+    del core_v1  # kept for call-site compatibility
     out: list[tuple[str, str]] = []
-    for ns in _iter_namespace_names(core_v1):
-        try:
-            data = custom.list_namespaced_custom_object(
-                group=_OLM_GROUP,
-                version=_OLM_VERSION,
-                namespace=ns,
-                plural=_PLURAL_INSTALLPLAN,
-                _request_timeout=_rt(),
-            )
-        except ApiException as e:
-            if e.status == 403:
-                continue
-            if e.status == 404:
-                continue
-            raise OperatorConfigError(
-                f"list installplans in {ns} failed: {e.reason or e}"
-            ) from e
-        if not isinstance(data, dict):
+    for item in _list_all_installplans(custom):
+        meta = item.get("metadata") or {}
+        name = meta.get("name")
+        ns = meta.get("namespace")
+        spec = item.get("spec") or {}
+        if spec.get("approved") is not False:
             continue
-        for item in data.get("items", []):
-            meta = item.get("metadata") or {}
-            name = meta.get("name")
-            spec = item.get("spec") or {}
-            if spec.get("approved") is not False:
-                continue
-            if not isinstance(name, str):
-                continue
-            out.append((ns, name))
+        if not isinstance(name, str) or not isinstance(ns, str):
+            continue
+        out.append((ns, name))
     return out
+
+
+def _subscription_has_installplan(
+    custom: client.CustomObjectsApi,
+    namespace: str,
+    name: str,
+) -> bool:
+    try:
+        sub = custom.get_namespaced_custom_object(
+            group=_OLM_GROUP,
+            version=_OLM_VERSION,
+            namespace=namespace,
+            plural=_PLURAL_SUBSCRIPTION,
+            name=name,
+            _request_timeout=_rt(),
+        )
+    except ApiException as e:
+        if e.status in (403, 404):
+            return False
+        raise OperatorConfigError(
+            f"get subscription/{name} in {namespace} failed: {e.reason or e}"
+        ) from e
+    if not isinstance(sub, dict):
+        return False
+    status = sub.get("status") or {}
+    if status.get("installPlanRef") or status.get("installplan"):
+        return True
+    # Fallback: any InstallPlan in the namespace naming this subscription's CSV
+    current_csv = status.get("currentCSV") or ""
+    for item in _list_all_installplans(custom):
+        meta = item.get("metadata") or {}
+        if meta.get("namespace") != namespace:
+            continue
+        spec = item.get("spec") or {}
+        csvs = spec.get("clusterServiceVersionNames") or []
+        if current_csv and current_csv in csvs:
+            return True
+        if not current_csv and csvs:
+            # Subscription exists and namespace has an IP — good enough
+            return True
+    return False
+
+
+def _wait_for_required_installplans(
+    custom: client.CustomObjectsApi,
+    *,
+    timeout_sec: int,
+    poll_sec: int,
+) -> None:
+    """Block until LVMS/SR-IOV Subscriptions have InstallPlans (or timeout)."""
+    print(
+        f"Waiting for required Subscriptions to produce InstallPlans "
+        f"(up to {timeout_sec}s) ...",
+        flush=True,
+    )
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        missing: list[str] = []
+        for ns, name in _REQUIRED_INSTALLPLAN_SUBSCRIPTIONS:
+            if _subscription_has_installplan(custom, ns, name):
+                continue
+            missing.append(f"{ns}/{name}")
+        if not missing:
+            print("Required InstallPlans are present.", flush=True)
+            return
+        print(
+            f"  still waiting for InstallPlan(s): {', '.join(missing)}",
+            flush=True,
+        )
+        time.sleep(poll_sec)
+    raise OperatorConfigError(
+        f"Timeout after {timeout_sec}s waiting for InstallPlans from "
+        f"{_REQUIRED_INSTALLPLAN_SUBSCRIPTIONS}."
+    )
 
 
 def _approve_pending_installplans(
     custom: client.CustomObjectsApi,
-    core_v1: client.CoreV1Api,
-) -> None:
-    """Merge-patch approved: true on each unapproved InstallPlan."""
-    pending = _list_unapproved_installplans(custom, core_v1)
+    core_v1: client.CoreV1Api | None = None,
+    *,
+    quiet_if_none: bool = False,
+) -> int:
+    """Merge-patch approved: true on each unapproved InstallPlan.
+
+    Returns the number of InstallPlans approved in this call.
+    """
+    del core_v1  # kept for call-site compatibility
+    pending = _list_unapproved_installplans(custom)
     if not pending:
-        print("No unapproved InstallPlans (nothing to approve).", flush=True)
-        return
+        if not quiet_if_none:
+            print("No unapproved InstallPlans (nothing to approve).", flush=True)
+        return 0
     print(f"Approving {len(pending)} pending InstallPlan(s) ...", flush=True)
     patch_body: dict[str, Any] = {"spec": {"approved": True}}
     for ns, ip_name in pending:
@@ -486,6 +566,7 @@ def _approve_pending_installplans(
                 f"patch installplan/{ip_name} in {ns} failed: {e.reason or e}"
             ) from e
     print("InstallPlan approval complete.", flush=True)
+    return len(pending)
 
 
 def _event_sort_key(ev: Any) -> datetime:
@@ -579,6 +660,9 @@ def _wait_csv_succeeded(
     print(msg, flush=True)
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
+        # Late Manual InstallPlans (created after the initial approval pass)
+        # must still be approved or CSVs never leave Pending.
+        _approve_pending_installplans(custom, quiet_if_none=True)
         if mc_state is not None:
             _maybe_remediate_machine_config(
                 custom,
@@ -818,6 +902,26 @@ def _sanitize_for_apply(doc: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _ensure_sriov_capable_label(
+    core_v1: client.CoreV1Api,
+    node_name: str,
+) -> None:
+    """Add network-sriov.capable via merge-patch (does not wipe other labels)."""
+    label = "feature.node.kubernetes.io/network-sriov.capable"
+    print(f"Ensuring node/{node_name} has label {label}=true ...", flush=True)
+    try:
+        core_v1.patch_node(
+            node_name,
+            {"metadata": {"labels": {label: "true"}}},
+            _request_timeout=_rt(),
+        )
+    except ApiException as e:
+        raise OperatorConfigError(
+            f"patch node/{node_name} label failed: {e.reason or e}"
+        ) from e
+    print(f"  node/{node_name} labeled.", flush=True)
+
+
 def _apply_file(path: Path, *, api_client: client.ApiClient) -> None:
     """Server-side apply each document using the object's metadata.namespace.
 
@@ -872,6 +976,8 @@ def apply_operator_config(
     mc_remediate_timeout_sec: int = 3600,
     mc_remediate_poll_sec: int = 15,
     skip_mc_remediation: bool = False,
+    installplan_wait_sec: int = 600,
+    installplan_poll_sec: int = 10,
 ) -> None:
     d = _operator_config_dir()
     if not d.is_dir():
@@ -892,7 +998,12 @@ def apply_operator_config(
     _apply_file(d / "monitoring-config-cm.yaml", api_client=api_client)
     _apply_file(d / "supported-nic-ids.yaml", api_client=api_client)
 
-    _approve_pending_installplans(custom, core_v1)
+    _wait_for_required_installplans(
+        custom,
+        timeout_sec=installplan_wait_sec,
+        poll_sec=installplan_poll_sec,
+    )
+    _approve_pending_installplans(custom)
 
     _wait_required_operator_csvs(
         custom=custom,
@@ -925,8 +1036,13 @@ def apply_operator_config(
         custom=custom,
         timeout_sec=crd_timeout_sec,
     )
+    # Patch-only: never replace the Node object (that wipes role labels).
+    _ensure_sriov_capable_label(core_v1, "master-0")
     sriov_manifest = d / "sriov-config-netdevice-eno2np1.yaml"
     _apply_file(sriov_manifest, api_client=api_client)
+
+    # Catch InstallPlans from slower AllNamespaces operators (GitOps/RHOAI/SNR).
+    _approve_pending_installplans(custom, quiet_if_none=True)
 
     print("operator-config apply complete.", flush=True)
 
@@ -935,8 +1051,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=(
             "Apply operator-config manifests: remediate stuck machine-config "
-            "if needed, approve pending InstallPlans, wait for LVMS/SR-IOV "
-            "CSVs, then for CRDs as needed."
+            "if needed, wait for and approve pending InstallPlans, wait for "
+            "LVMS/SR-IOV CSVs, then for CRDs as needed."
         ),
     )
     p.add_argument(
@@ -971,6 +1087,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Seconds to wait for each CRD (default: 900).",
     )
     p.add_argument(
+        "--installplan-wait",
+        type=int,
+        default=_env_int("WAIT_INSTALLPLAN_TIMEOUT_SEC", 600),
+        metavar="SEC",
+        help=(
+            "Seconds to wait for LVMS/SR-IOV Subscriptions to create "
+            "InstallPlans before approval "
+            "(default: 600, or WAIT_INSTALLPLAN_TIMEOUT_SEC)."
+        ),
+    )
+    p.add_argument(
+        "--installplan-poll",
+        type=int,
+        default=_env_int("WAIT_INSTALLPLAN_POLL_SEC", 10),
+        metavar="SEC",
+        help=(
+            "Poll interval while waiting for InstallPlans "
+            "(default: 10, or WAIT_INSTALLPLAN_POLL_SEC)."
+        ),
+    )
+    p.add_argument(
         "--mc-remediate-timeout",
         type=int,
         default=_env_int("MC_REMEDIATE_TIMEOUT_SEC", 3600),
@@ -995,10 +1132,23 @@ def main(argv: list[str] | None = None) -> int:
             "is degraded with missing currentconfig."
         ),
     )
+    p.add_argument(
+        "--approve-only",
+        action="store_true",
+        help=(
+            "Only approve pending Manual InstallPlans and exit "
+            "(used after applying remaining operator-install manifests)."
+        ),
+    )
     args = p.parse_args(argv)
 
     try:
         kc = _resolve_kubeconfig(args.kubeconfig)
+        if args.approve_only:
+            _api_client, _core_v1, custom, _ext = _load_clients(kc)
+            n = _approve_pending_installplans(custom)
+            print(f"approve-only done ({n} InstallPlan(s)).", flush=True)
+            return 0
         apply_operator_config(
             kubeconfig=kc,
             csv_timeout_sec=args.csv_timeout,
@@ -1007,6 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
             mc_remediate_timeout_sec=args.mc_remediate_timeout,
             mc_remediate_poll_sec=args.mc_remediate_poll,
             skip_mc_remediation=args.skip_mc_remediation,
+            installplan_wait_sec=args.installplan_wait,
+            installplan_poll_sec=args.installplan_poll,
         )
     except OperatorConfigError as e:
         print(f"Error: {e}", file=sys.stderr, flush=True)

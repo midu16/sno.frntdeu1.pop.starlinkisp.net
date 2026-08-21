@@ -20,7 +20,8 @@ spec:
     pfNames:
     - eno2np1#0-29
   nodeSelector:
-    feature.node.kubernetes.io/network-sriov.capable: 'true'
+    # SNO: pin to master-0 (label is ensured by apply_operator_config.py).
+    kubernetes.io/hostname: master-0
   numVfs: 50
   priority: 50
   resourceName: sriov_netdevice_eno2np1

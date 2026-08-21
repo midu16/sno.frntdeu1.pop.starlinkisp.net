@@ -177,9 +177,11 @@ jobs:
           done
           exit 1
 
-      # Idempotent: subscriptions/namespaces may already exist on workflow retry.
-      - name: Apply operator-install manifests
-        run: oc apply --kubeconfig="${KUBECONFIG_PATH}" -f abi-master-0/extra-manifests/operator-install/
+      # Phase 1: storage/network OwnNamespace operators first so LVMS/SR-IOV
+      # InstallPlans exist before AllNamespaces operators (GitOps/RHOAI/SNR)
+      # flood OLM with copied CSVs.
+      - name: Apply critical operator-install manifests
+        run: ./scripts/apply-operator-install.sh --phase1-only
 
       - name: Validate no degraded operators
         run: |
@@ -190,10 +192,18 @@ jobs:
           fi
           echo "✅ No degraded Operators"
 
-      # InstallPlan approval, CSV waits, and operator CRs are implemented in scripts/apply_operator_config.py
-      # (uses kubernetes Python client; requires make deps / requirements.txt).
+      # InstallPlan wait/approval, CSV waits, and operator CRs are implemented in
+      # scripts/apply_operator_config.py (kubernetes Python client; requires make deps).
       - name: Apply operator-config (InstallPlans, LVMS/SR-IOV, manifests)
         run: ./.venv/bin/python3 scripts/apply_operator_config.py --kubeconfig="${KUBECONFIG_PATH}"
+
+      # Phase 2: AllNamespaces operators + MinIO (PVC needs lvms-vg1 StorageClass).
+      - name: Apply remaining operator-install manifests
+        run: |
+          set -euo pipefail
+          ./scripts/apply-operator-install.sh --phase2-only
+          ./.venv/bin/python3 scripts/apply_operator_config.py \
+            --kubeconfig="${KUBECONFIG_PATH}" --approve-only
 
       - name: Apply node-exporter-zoneinfo (monitoring)
         run: oc apply --kubeconfig="${KUBECONFIG_PATH}" -k abi-master-0/extra-manifests/node-exporter-zoneinfo/

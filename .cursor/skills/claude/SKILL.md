@@ -156,12 +156,20 @@ make lint
 ### Post-Install
 
 ```bash
-export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
+export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig   # or ./kubeconfig
 
-# Approve InstallPlans, wait for LVMS/SR-IOV CSVs, apply operator-config (Python + kubernetes client)
 make deps   # if not already: installs requirements.txt including kubernetes
+
+# Phase 1 critical operators, then wait/approve InstallPlans + LVMS/SR-IOV CRs
+./scripts/apply-operator-install.sh --phase1-only
 ./.venv/bin/python3 scripts/apply_operator_config.py
+
+# Phase 2 AllNamespaces operators + MinIO (after lvms-vg1 exists)
+./scripts/apply-operator-install.sh --phase2-only
+./.venv/bin/python3 scripts/apply_operator_config.py --approve-only
 ```
+
+**Known race (fixed in script):** applying `operator-config` immediately after Subscriptions can approve zero InstallPlans (OLM has not created them yet) and then hang waiting for CSVs. The script now waits for LVMS/SR-IOV InstallPlans, re-approves during CSV polls, and supports `--approve-only` for phase-2 Subscriptions.
 
 ## Environment Details
 

@@ -99,13 +99,21 @@ Individual iDRAC operations: `make status`, `make eject`, `make set-boot-cd`, `m
 ## Post-install
 
 ```bash
-export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig
+export KUBECONFIG=$(pwd)/workdir/auth/kubeconfig   # or ./kubeconfig
 
-# Install Day-2 operators (idempotent)
-oc apply -f ./abi-master-0/extra-manifests/operator-install/
+# Phase 1: storage/network operators (LVMS, SR-IOV, …) before AllNamespaces operators
+for f in 99_03_lvms.yaml 99_05_sriov.yaml 99_04_ptp.yaml 99_02_logging.yaml 99_08_lightspeed.yaml; do
+  oc apply -f "./abi-master-0/extra-manifests/operator-install/${f}"
+done
 
-# Approve InstallPlans, wait for LVMS/SR-IOV, apply operator-config manifests
+# Wait for Manual InstallPlans, approve them, wait for LVMS/SR-IOV CSVs, apply CRs
 ./.venv/bin/python3 scripts/apply_operator_config.py
+
+# Phase 2: AllNamespaces operators + MinIO (needs lvms-vg1 StorageClass)
+for f in 99_01_argo.yaml 99_09_rhoai.yaml 99_10_snr.yaml 99_07_minio.yaml 99_07_minio_routes.yaml; do
+  oc apply -f "./abi-master-0/extra-manifests/operator-install/${f}"
+done
+./.venv/bin/python3 scripts/apply_operator_config.py --approve-only
 
 # Optional: supplementary node_exporter metrics (see docs/node-exporter-zoneinfo*.md)
 oc apply -k ./abi-master-0/extra-manifests/node-exporter-zoneinfo/
@@ -124,7 +132,7 @@ make lint          # flake8 on idrac_sushy.py and test_idrac_sushy.py
 
 ## CI/CD
 
-The workflow [.github/workflows/install.yml](./.github/workflows/install.yml) provides a manual trigger (`workflow_dispatch`) to run a full SNO install on a self-hosted runner. It uses secrets for `IDRAC_PW` and workflow inputs for the OpenShift version, primary `INSTALL_WAIT_ATTEMPTS`, post-failure **`REMEDIATION_INSTALL_WAIT_ATTEMPTS`**, and **ISO/iDRAC pacing** (defaults: **120s** post-`scp`, **120s** after Virtual CD insert, **30s** after boot-order before `ForceRestart`, **45s** after restart; optional **HTTP range probe** of the ISO URL). On install failure it uploads **`abi-install-diagnostics`**. The job checks out the repo, runs `make deps`, then `make install` with `PATH` including `.venv/bin`. After the cluster is up it applies `operator-install`, validates cluster operators, runs `scripts/apply_operator_config.py`, and applies `node-exporter-zoneinfo`.
+The workflow [.github/workflows/install.yml](./.github/workflows/install.yml) provides a manual trigger (`workflow_dispatch`) to run a full SNO install on a self-hosted runner. It uses secrets for `IDRAC_PW` and workflow inputs for the OpenShift version, primary `INSTALL_WAIT_ATTEMPTS`, post-failure **`REMEDIATION_INSTALL_WAIT_ATTEMPTS`**, and **ISO/iDRAC pacing** (defaults: **120s** post-`scp`, **120s** after Virtual CD insert, **30s** after boot-order before `ForceRestart`, **45s** after restart; optional **HTTP range probe** of the ISO URL). On install failure it uploads **`abi-install-diagnostics`**. The job checks out the repo, runs `make deps`, then `make install` with `PATH` including `.venv/bin`. After the cluster is up it applies **critical** `operator-install` manifests (LVMS/SR-IOV first), validates cluster operators, runs `scripts/apply_operator_config.py` (waits for InstallPlans before approval), applies remaining operators (GitOps/RHOAI/SNR/MinIO) with `--approve-only`, and applies `node-exporter-zoneinfo`.
 
 ## Use cases
 

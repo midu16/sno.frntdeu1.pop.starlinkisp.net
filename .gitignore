@@ -85,3 +85,9 @@ venv/
 .env.local
 .env.*.local
 
+# Local cluster credentials (never commit)
+kubeconfig
+kubeadmin-password
+**/auth/kubeconfig
+**/auth/kubeadmin-password
+

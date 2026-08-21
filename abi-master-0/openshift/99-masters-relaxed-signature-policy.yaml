@@ -1,0 +1,38 @@
+# Relax the container image signature policy for UNSIGNED CI nightlies.
+#
+# RHCOS ships /etc/containers/policy.json requiring sigstoreSigned for the
+# quay.io/openshift-release-dev/{ocp-release,ocp-v4.0-art-dev,ocp-v5.0-art-dev}
+# scopes. CI nightlies are NOT signed, so machine-config-daemon-pull.service (and
+# later every crio operator-image pull) is rejected with:
+#   "Source image rejected: A signature was required, but no signature exists"
+# and firstboot never completes.
+#
+# Baking this MachineConfig into the agent ISO (the agent installer folds
+# abi-master-0/openshift/*.yaml into the ignition) makes firstboot start with the
+# relaxed policy, so the pull service never blocks — no mid-install SSH
+# remediation needed (replaces scripts/remediate-unsigned-nightly-policy.sh).
+#
+# ⚠️ Only appropriate for throwaway lab installs on unsigned CI nightlies. GA/ec/rc
+# payloads ARE signed; remove/omit this manifest for those to keep the stock
+# signed policy.
+#
+# Content mirrors scripts/remediate-unsigned-nightly-policy.sh:
+#   {"default":[{"type":"insecureAcceptAnything"}],
+#    "transports":{"docker-daemon":{"":[{"type":"insecureAcceptAnything"}]}}}
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  labels:
+    machineconfiguration.openshift.io/role: master
+  name: 99-masters-relaxed-signature-policy
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+      - contents:
+          source: data:text/plain;charset=utf-8;base64,ewogICJkZWZhdWx0IjogW3sidHlwZSI6ICJpbnNlY3VyZUFjY2VwdEFueXRoaW5nIn1dLAogICJ0cmFuc3BvcnRzIjogewogICAgImRvY2tlci1kYWVtb24iOiB7IiI6IFt7InR5cGUiOiAiaW5zZWN1cmVBY2NlcHRBbnl0aGluZyJ9XX0KICB9Cn0K
+        mode: 420
+        overwrite: true
+        path: /etc/containers/policy.json

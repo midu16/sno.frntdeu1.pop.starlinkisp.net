@@ -1,0 +1,7 @@
+additionalProperties: false
+properties:
+    state_file:
+        type: string
+required:
+    - state_file
+type: object

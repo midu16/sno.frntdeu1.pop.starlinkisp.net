@@ -1,0 +1,94 @@
+[
+  {
+    "description": "Trigger the full Single Node OpenShift (SNO) installation from a desired-state YAML document. Reads the state file (source of truth for cluster identity, network plan and OpenShift version), resolves iDRAC/webcache/pull-secret references, then runs the idempotent install pipeline (preflight -\u003e ssh-key -\u003e extract -\u003e prepare-configs -\u003e build-iso -\u003e copy-iso -\u003e iDRAC deploy -\u003e wait-install). Re-running is safe: a node that already carries the requested OpenShift is detected and left untouched. Use dry_run=true for a read-only validation + idempotency plan.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state_file": {
+          "type": "string"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "release_image": {
+          "type": "string"
+        },
+        "ocp_version": {
+          "type": "string"
+        },
+        "iso_url": {
+          "type": "string"
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state_file"
+      ],
+      "additionalProperties": false
+    },
+    "name": "sno_install",
+    "title": "SNO Install"
+  },
+  {
+    "description": "Validate a Single Node OpenShift desired-state YAML document against the sno.infra/v1 schema. Read-only: safe to call from CI. Returns the resolved cluster identity, base domain, version and node IP.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state_file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state_file"
+      ],
+      "additionalProperties": false
+    },
+    "name": "state_validate",
+    "title": "Validate Desired State"
+  },
+  {
+    "description": "Generate the read-only idempotency plan for a desired-state document: which install stages will run, skip or verify, plus warnings (missing pull secret, existing cluster, etc.). Safe on any machine.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "state_file": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state_file"
+      ],
+      "additionalProperties": false
+    },
+    "name": "state_plan",
+    "title": "State Idempotency Plan"
+  },
+  {
+    "description": "List the OpenShift versions currently supported by the Red Hat version catalog (https://api.openshift.com/products/openshift). Read-only: drives the CI version matrix and lets an agent pick a compliant version.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "name": "ocp_versions",
+    "title": "OpenShift Versions"
+  },
+  {
+    "description": "Return the newest GA OpenShift version from the Red Hat version catalog, including its quay pullspec. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "name": "ocp_latest",
+    "title": "Latest OpenShift Version"
+  }
+]

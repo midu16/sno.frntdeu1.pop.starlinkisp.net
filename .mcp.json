@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "sno-installer": {
+      "command": "bin/sno-mcp",
+      "args": [],
+      "env": {
+        "SNO_LOG_FILE": "/dev/stderr",
+        "SNO_LOG_LEVEL": "info",
+        "SNO_STATE_FILE": "config/sno-state.yaml"
+      },
+      "description": "Expose the Golang-native SNO installer as MCP tools. Reads the desired-state YAML and (unless dry_run) triggers the full idempotent OpenShift install in one tool call. Logs to stderr; stdout is reserved for the MCP protocol."
+    }
+  }
+}

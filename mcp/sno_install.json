@@ -1,0 +1,1 @@
+{"type":"object","properties":{"state_file":{"type":"string"},"dry_run":{"type":"boolean"},"release_image":{"type":"string"},"ocp_version":{"type":"string"},"iso_url":{"type":"string"},"workdir":{"type":"string"}},"required":["state_file"],"additionalProperties":false}

@@ -1,0 +1,7 @@
+additionalProperties: false
+properties:
+    limit:
+        type: integer
+required:
+    - limit
+type: object

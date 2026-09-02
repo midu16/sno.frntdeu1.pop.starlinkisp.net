@@ -1,0 +1,17 @@
+additionalProperties: false
+properties:
+    dry_run:
+        type: boolean
+    iso_url:
+        type: string
+    ocp_version:
+        type: string
+    release_image:
+        type: string
+    state_file:
+        type: string
+    workdir:
+        type: string
+required:
+    - state_file
+type: object

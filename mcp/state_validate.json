@@ -1,0 +1,1 @@
+{"type":"object","properties":{"state_file":{"type":"string"}},"required":["state_file"],"additionalProperties":false}

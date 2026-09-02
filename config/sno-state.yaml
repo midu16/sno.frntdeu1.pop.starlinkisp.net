@@ -1,0 +1,97 @@
+# =============================================================================
+# SNO cluster desired state — single source of truth
+#
+# This document is consumed by all three entry points of the automation:
+#
+#   - the CLI:      sno-installer install --state config/sno-state.yaml
+#   - the CI/CD:    .github/workflows/install.yml (dry-run + install jobs)
+#   - the MCP:      cmd/sno-mcp (sno_install tool, one call = full install)
+#
+# Loading it yields a fully validated sno.Config (internal/state), so the
+# deployed cluster converges to exactly this state and re-runs are
+# idempotent (stage markers + compliance short-circuit in internal/sno).
+#
+# Sensitive material is NEVER embedded here: the iDRAC password comes from
+# the environment (passwordEnv), the pull secret and SSH key are referenced
+# by local path and resolved at run time.
+# =============================================================================
+apiVersion: sno.infra/v1
+kind: SNOClusterState
+metadata:
+  # install-config clusterName / baseDomain (cluster FQDN: sno.frntdeu1.pop.starlinkisp.net)
+  name: sno
+  baseDomain: frntdeu1.pop.starlinkisp.net
+spec:
+  openshift:
+    # GA / pre-GA version (X.Y.Z[-ec/fc/rc.N]). For CI nightlies or mirrored
+    # images set releaseImage to the full pullspec instead (it wins).
+    version: "5.0.0-ec.6"
+    # pull secret (docker config.json) — referenced, never embedded
+    pullSecretFile: ~/.docker/config.json
+    # node SSH public key — referenced, never embedded
+    sshKey: ~/.ssh/id_ed25519.pub
+  networking:
+    # underlay (node + BMC)
+    machineNetwork: 192.168.1.0/24
+    # ClusterIP
+    serviceNetwork: 172.30.0.0/16
+    # pod CIDR (hostPrefix 23 => per-node /23)
+    clusterNetwork: 10.128.0.0/14
+    nodeCIDR: "/23"
+    # SNO node / rendezvous IP
+    nodeIP: 192.168.1.133
+  idrac:
+    host: 192.168.1.228
+    user: root
+    # password from the environment (CI secret IDRAC_PW); never inline
+    passwordEnv: IDRAC_PW
+  webcache:
+    # ISO HTTP origin + SFTP target
+    user: rock
+    host: 192.168.1.21
+    remotePath: /apps/webcache/OSs/
+    # URL the iDRAC VirtualCD mounts (must end in .iso)
+    isoURL: http://192.168.1.21:8080/OSs/agent.x86_64.iso
+  installer:
+    workDir: ./workdir
+    srcDir: ./abi-master-0
+    installer: ./openshift-install
+  # Extra manifests staged into workdir/openshift (whole directory is copied
+  # by PrepareConfigs; the list documents the desired set).
+  machineConfigs:
+    - abi-master-0/openshift/01-container-mount-ns-and-kubelet-conf-master.yaml
+    - abi-master-0/openshift/02-masters-workload-partitioning.yaml
+    - abi-master-0/openshift/04-accelerated-container-startup-master.yaml
+    - abi-master-0/openshift/97-disable-dhcp-master.yaml
+    - abi-master-0/openshift/99-kdump-master.yaml
+    - abi-master-0/openshift/99-masters-chrony-configuration.yaml
+    - abi-master-0/openshift/99-masters-disable-crio-wipe.yaml
+    - abi-master-0/openshift/99-masters-relaxed-signature-policy.yaml
+    - abi-master-0/openshift/99-static-pod-check-workaround-master.yaml
+    - abi-master-0/openshift/cgroupv2.yaml
+    - abi-master-0/openshift/crio-capabilities-master.yaml
+    - abi-master-0/openshift/crun.yaml
+    - abi-master-0/openshift/disable-cluster-network-check.yaml
+    - abi-master-0/openshift/load-mpls-module.yaml
+    - abi-master-0/openshift/pao.yaml
+    - abi-master-0/openshift/sctp_module_mc.yaml
+    - abi-master-0/openshift/set-powersave.yaml
+    - abi-master-0/openshift/systemd-pstore-master.yaml
+  # Wait / retry / pacing policy (mirrors the CI workflow defaults;
+  # zero = installer default / env override).
+  policy:
+    installWaitAttempts: 2
+    remediationInstallWaitAttempts: 3
+    apiReadyWaitSec: 1800
+    apiReadyPollSec: 15
+    apiReadySettleSec: 90
+    apiReadyStablePolls: 3
+    postCopyISOSleepSec: 120
+    idracDeployAfterInsertSec: 120
+    idracDeployBeforeRestartSec: 30
+    idracDeployAfterRestartSec: 45
+    isoHTTPProbe: true
+  # Day-2 operator manifests layout (matches the repo defaults).
+  day2:
+    installDir: abi-master-0/extra-manifests/operator-install
+    configDir: abi-master-0/extra-manifests/operator-config

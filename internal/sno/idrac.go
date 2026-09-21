@@ -262,13 +262,17 @@ func (i *Installer) Deploy(isoURL string) error {
 	}
 	i.banner()
 
-	// 3 — One-time boot to VirtualCD.
+	// 3 — One-time boot to VirtualCD (the "Virtual CD/DVD/ISO" device).
+	// SetOneShotBoot verifies the read-back value; if it cannot confirm the
+	// one-time boot is on the virtual optical device it errors out, so the
+	// restart below is never issued while boot would fall back to the local
+	// disk (Normal) instead of the install ISO.
 	if err := i.step("deploy.set-boot-cd", func() error {
-		i.Logf("Setting one-time boot to VirtualCD ...")
+		i.Logf("Setting one-time boot to %s (Redfish BootSourceOverrideTarget=%s) ...", redfish.VirtualCDDVDISOLabel(), redfish.BootVirtualMediaCD)
 		if err := cl.SetOneShotBoot(i.Ctx, redfish.BootVirtualMediaCD); err != nil {
 			return err
 		}
-		i.Logf("  Boot device set via Dell OEM Redfish extension.")
+		i.Logf("  Boot device confirmed: %s (one-time, verified by read-back).", redfish.VirtualCDDVDISOLabel())
 		return nil
 	}); err != nil {
 		return err

@@ -42,6 +42,10 @@ id_*
 # OpenShift installer
 openshift-install
 
+# binaries
+sno-installer
+sno-mcp
+
 # ISO files
 *.iso
 

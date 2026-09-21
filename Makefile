@@ -1,73 +1,97 @@
-SCRIPT    = idrac_sushy.py
-TEST_FILE = test_idrac_sushy.py
-VENV_DIR  = .venv
-# Use venv Python when present (after make deps), else system python3
-PYTHON    = $(or $(wildcard $(VENV_DIR)/bin/python3),python3)
-PYTEST    = $(PYTHON) -m pytest
+# SNO OpenShift Installer — Go-native automation
+#
+# The install pipeline, iDRAC (Redfish) control, day-2 operator work and the
+# MCP server are all implemented in Go under cmd/ and internal/. This Makefile
+# builds the binaries and drives the CLI; it no longer depends on the legacy
+# Python tooling (idrac_sushy.py / pytest / flake8).
 
+BINARY       = sno-installer
+MCP_BINARY   = sno-mcp
+GO           ?= go
+STATE        ?= config/sno-state.yaml
+# Version stamped into the binaries at build time.
+VERSION      ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS      = -s -w -X main.version=$(VERSION)
+
+# Release selection. OCP_VERSION (X.Y.Z[-ec/fc/rc.N]) maps to the public quay
+# tag; RELEASE_IMAGE (full pullspec) wins and is used verbatim for CI
+# nightlies / mirrored images that do not follow that pattern.
+OCP_VERSION   ?=
+OCP_FLAG      = $(if $(OCP_VERSION),--ocp-version $(OCP_VERSION),)
+RELEASE_IMAGE ?=
+RELEASE_FLAG  = $(if $(RELEASE_IMAGE),--release-image $(RELEASE_IMAGE),)
+
+# iDRAC access: IDRAC_PW is required for iDRAC operations and is NEVER
+# committed to the repo (it is supplied via the environment / a CI secret).
 export IDRAC_PW
 export IDRAC_IP
 export IDRAC_USER
-# Optional: openshift-install allows ~90m per wait-for install-complete; default 2 attempts in idrac_sushy.py
+
+# Optional pacing / retry knobs consumed by the Go installer (see
+# internal/sno). Kept as plain exports so the `sno-installer` process sees them.
 export INSTALL_WAIT_ATTEMPTS
-# Optional: after primary waits fail, extra install-complete rounds if kubeconfig exists (see idrac_sushy.py)
 export REMEDIATION_INSTALL_WAIT_ATTEMPTS
-# Optional: wait for kube-apiserver /readyz between install-complete retries (SNO reboot)
 export API_READY_WAIT_SEC
 export API_READY_POLL_SEC
 export API_READY_SETTLE_SEC
 export API_READY_STABLE_POLLS
-# Optional: active MCO remediation between wait attempts (align annotations, CSRs, MCD restart)
 export SKIP_MC_REMEDIATION
 export MC_REMEDIATION_WAIT_SEC
 export FIX_WORKLOAD_PINNING
-# Optional: override the release image pullspec (pre-GA / mirrored / CI images)
-export RELEASE_IMAGE
-# Optional: copy-iso / iDRAC deploy pacing (see idrac_sushy.py)
 export POST_COPY_ISO_SLEEP_SEC
 export ISO_HTTP_PROBE
 export IDRAC_DEPLOY_AFTER_EJECT_SEC
 export IDRAC_DEPLOY_AFTER_INSERT_SEC
 export IDRAC_DEPLOY_BEFORE_RESTART_SEC
 export IDRAC_DEPLOY_AFTER_RESTART_SEC
-OCP_VERSION ?=
-OCP_FLAG     = $(if $(OCP_VERSION),--ocp-version $(OCP_VERSION),)
-# Optional: override the release image pullspec (pre-GA / mirrored / CI images)
-RELEASE_IMAGE ?=
-RELEASE_FLAG  = $(if $(RELEASE_IMAGE),--release-image $(RELEASE_IMAGE),)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help deps install preflight ssh-key extract-installer prepare-configs \
-        build-iso copy-iso deploy status eject restart power-on power-off \
-        set-boot-cd set-boot-hdd wait-power-on wait-install \
-        test test-verbose test-coverage lint clean
+.PHONY: help build build-mcp install preflight ssh-key extract-installer \
+        prepare-configs build-iso copy-iso deploy insert wait-install \
+        wait-install-remediate wait-api-ready remediate-mco \
+        status eject set-boot-cd set-boot-hdd restart power-on power-off \
+        wait-power-on day2 operator-config node-exporter diagnostics sol \
+        state-validate state-plan test test-verbose test-coverage \
+        fmt vet lint clean tidy
 
-# ---- Help -------------------------------------------------------------------
+# ---- Help --------------------------------------------------------------------
 
 help:
 	@echo ""
-	@echo "SNO OpenShift Installer — Makefile targets"
+	@echo "SNO OpenShift Installer (Go-native) — Makefile targets"
 	@echo ""
-	@echo "  Setup"
-	@echo "    deps               Create .venv (if needed) and pip install -r requirements.txt"
-	@echo "    clean              Remove workdir, caches, openshift-install"
+	@echo "  Build"
+	@echo "    build              Build the $(BINARY) and $(MCP_BINARY) binaries"
+	@echo "    tidy               go mod tidy"
+	@echo "    clean              Remove binaries, workdir, openshift-install, caches"
 	@echo ""
 	@echo "  Full workflow"
-	@echo "    install            Full end-to-end SNO installation"
+	@echo "    install            Full end-to-end SNO installation (idempotent)"
 	@echo ""
 	@echo "  Individual steps"
-	@echo "    preflight          Check/install prerequisites"
-	@echo "    ssh-key            Generate SSH key and copy to webcache host"
-	@echo "    extract-installer  Extract openshift-install from OCP release"
-	@echo "    prepare-configs    Prepare workdir with templated configs"
-	@echo "    build-iso          Build agent ISO"
-	@echo "    copy-iso           SCP ISO to webcache host"
-	@echo "    deploy             iDRAC: eject → insert → boot-cd → restart → wait"
-	@echo "    wait-install       Wait for install-complete"
+	@echo "    preflight          Check prerequisites"
+	@echo "    ssh-key            Generate SSH key and install on webcache host"
+	@echo "    extract-installer  Extract openshift-install from the OCP release"
+	@echo "    prepare-configs    Stage workdir with templated configs"
+	@echo "    build-iso          Build the agent ISO"
+	@echo "    copy-iso           SFTP the ISO to the webcache host (+ HTTP probe)"
+	@echo "    insert <iso-url>   Mount virtual media from URL"
+	@echo "    deploy <iso-url>   iDRAC: eject -> insert -> boot-cd -> restart -> wait"
+	@echo "    wait-install       Wait for install-complete (API-ready gates)"
+	@echo "    wait-install-remediate  wait-install + MCO remediation + extra rounds"
+	@echo "    wait-api-ready     Block until kube-apiserver /readyz is stable"
+	@echo "    remediate-mco      Stuck-MachineConfig recovery procedure"
+	@echo "    day2               Post-install operator phases / config (see help)"
+	@echo "    operator-config    Apply operator-config (OLM waits, CRs)"
+	@echo "    node-exporter      Cross-validate node-exporter collectors"
+	@echo "    diagnostics        Collect install-failure artifact bundle"
+	@echo "    sol                Run a command on the node via iDRAC SOL"
+	@echo "    state-validate     Validate the desired-state YAML"
+	@echo "    state-plan         Print the idempotency plan for the state"
 	@echo ""
 	@echo "  iDRAC operations"
-	@echo "    status             Show system model, power state, virtual media"
+	@echo "    status             Show model, power state, virtual media"
 	@echo "    eject              Eject virtual media"
 	@echo "    set-boot-cd        Set one-time boot to VirtualCD"
 	@echo "    set-boot-hdd       Set one-time boot to HDD"
@@ -76,127 +100,162 @@ help:
 	@echo "    power-off          Force power off server"
 	@echo "    wait-power-on      Wait for power-on state"
 	@echo ""
-	@echo "  Testing"
-	@echo "    test               Run functional tests"
-	@echo "    test-verbose       Run tests with stdout capture disabled"
-	@echo "    test-coverage      Run tests with coverage report"
-	@echo "    lint               Run flake8 linter"
+	@echo "  Testing / quality"
+	@echo "    test               go test ./... -v"
+	@echo "    test-verbose       go test ./... -v"
+	@echo "    test-coverage      go test ./... -cover"
+	@echo "    fmt                gofmt -w ."
+	@echo "    vet                go vet ./..."
+	@echo "    lint               gofmt check + go vet"
 	@echo ""
 	@echo "  Environment / Make variables"
-	@echo "    IDRAC_PW           iDRAC password (required for iDRAC ops)"
-	@echo "    IDRAC_IP           iDRAC IP (default: 192.168.1.228)"
-	@echo "    IDRAC_USER         iDRAC username (default: root)"
-	@echo "    INSTALL_WAIT_ATTEMPTS        Primary install-complete retries (default: 2)"
-	@echo "    REMEDIATION_INSTALL_WAIT_ATTEMPTS  Extra rounds after primary failure if kubeconfig exists (default: 0)"
-	@echo "    API_READY_WAIT_SEC          Wait for /readyz between wait-for retries (default: 1800; 0=off)"
-	@echo "    API_READY_SETTLE_SEC        Settle after /readyz stable before retry (default: 90)"
-	@echo "    API_READY_STABLE_POLLS     Consecutive /readyz successes required (default: 3)"
-	@echo "    POST_COPY_ISO_SLEEP_SEC     Wait after scp before iDRAC (default: 0)"
-	@echo "    ISO_HTTP_PROBE              1/true: range-GET ISO URL after copy (default: off)"
-	@echo "    IDRAC_DEPLOY_*_SEC          Deploy pacing (defaults in idrac_sushy.cmd_deploy)"
-	@echo "    OCP_VERSION        OpenShift version (default: 5.0.0-ec.6)"
-	@echo "    RELEASE_IMAGE      Override release image pullspec (pre-GA/mirrored/CI images)"
+	@echo "    IDRAC_PW           iDRAC password (required for iDRAC ops; never committed)"
+	@echo "    IDRAC_IP           iDRAC IP (default 192.168.1.228, from the state)"
+	@echo "    IDRAC_USER         iDRAC username (default root, from the state)"
+	@echo "    STATE              desired-state YAML (default $(STATE))"
+	@echo "    OCP_VERSION        OpenShift version X.Y.Z[-ec/fc/rc.N]"
+	@echo "    RELEASE_IMAGE      release image pullspec override (CI nightlies)"
+	@echo "    OCP_VERSION / RELEASE_IMAGE and the pacing/retry knobs above are passed through"
 	@echo ""
 	@echo "  Examples"
-	@echo "    make install IDRAC_PW='pass' OCP_VERSION=5.0.0-ec.6"
-	@echo "    make extract-installer OCP_VERSION=4.18.6"
-	@echo "    make install RELEASE_IMAGE=registry.example.com/ocp-release:5.0.0-ec.6-x86_64"
 	@echo "    make status IDRAC_PW='pass'"
+	@echo "    make install IDRAC_PW='pass' OCP_VERSION=5.0.0-rc.2"
+	@echo "    make install RELEASE_IMAGE=registry.example.com/ocp-release:5.0.0-ec.6-x86_64"
+	@echo "    make day2 phases PHASE2=1   # after a successful install"
 	@echo ""
 
-# ---- Setup ------------------------------------------------------------------
+# ---- Build -------------------------------------------------------------------
 
-# Create .venv if missing and install deps (avoids externally-managed-environment on Debian/Ubuntu)
-deps:
-	@if [ ! -d "$(VENV_DIR)" ]; then \
-		echo "Creating virtual environment in $(VENV_DIR)..."; \
-		if ! python3 -m venv $(VENV_DIR) 2>/dev/null; then \
-			echo "python3-venv missing. Installing (OS detection)..."; \
-			if command -v apt-get >/dev/null 2>&1; then sudo apt-get update -qq && sudo apt-get install -y python3-venv python3-full; \
-			elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y python3-virtualenv; \
-			elif command -v yum >/dev/null 2>&1; then sudo yum install -y python3-virtualenv; \
-			else echo "ERROR: Install python3-venv (Debian/Ubuntu) or python3-virtualenv (RHEL/Fedora) and re-run make deps"; exit 1; fi; \
-			python3 -m venv $(VENV_DIR); \
-		fi; \
-	fi; \
-	$(VENV_DIR)/bin/pip install --upgrade pip; \
-	$(VENV_DIR)/bin/pip install -r requirements.txt
-	@echo "Dependencies installed. Use: make install (or $(VENV_DIR)/bin/python3 $(SCRIPT) ...)"
+build:
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/sno-installer
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(MCP_BINARY) ./cmd/sno-mcp
+	@echo "Built ./$(BINARY) and ./$(MCP_BINARY) (version $(VERSION))."
+
+build-mcp:
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(MCP_BINARY) ./cmd/sno-mcp
+
+tidy:
+	$(GO) mod tidy
 
 clean:
-	rm -rf workdir/ openshift-install __pycache__ .pytest_cache htmlcov .coverage
+	rm -rf workdir/ openshift-install $(BINARY) $(MCP_BINARY)
+	rm -rf __pycache__ .pytest_cache htmlcov .coverage
 	find . -name '*.pyc' -delete 2>/dev/null || true
 
 # ---- Full workflow -----------------------------------------------------------
 
-install:
-	$(PYTHON) $(SCRIPT) $(OCP_FLAG) $(RELEASE_FLAG) install
+# install runs the full end-to-end pipeline. It is idempotent (skips the
+# destructive re-provision when a live cluster API is already reachable); delete
+# workdir/ to force a clean reinstall.
+install: build
+	./$(BINARY) install $(OCP_FLAG) $(RELEASE_FLAG) --state $(STATE) $(EXTRA)
 
 # ---- Individual steps --------------------------------------------------------
 
-preflight:
-	$(PYTHON) $(SCRIPT) preflight
+preflight: build
+	./$(BINARY) preflight --state $(STATE)
 
-ssh-key:
-	$(PYTHON) $(SCRIPT) ensure-ssh-key
+ssh-key: build
+	./$(BINARY) ensure-ssh-key --state $(STATE)
 
-extract-installer:
-	$(PYTHON) $(SCRIPT) $(OCP_FLAG) $(RELEASE_FLAG) extract-installer
+extract-installer: build
+	./$(BINARY) extract-installer $(OCP_FLAG) $(RELEASE_FLAG) --state $(STATE)
 
-prepare-configs:
-	$(PYTHON) $(SCRIPT) prepare-configs
+prepare-configs: build
+	./$(BINARY) prepare-configs --state $(STATE)
 
-build-iso:
-	$(PYTHON) $(SCRIPT) build-iso
+build-iso: build
+	./$(BINARY) build-iso --state $(STATE)
 
-copy-iso:
-	$(PYTHON) $(SCRIPT) copy-iso
+copy-iso: build
+	./$(BINARY) copy-iso --state $(STATE)
 
-deploy:
-	$(PYTHON) $(SCRIPT) deploy $(ISO_URL)
+deploy: build
+	./$(BINARY) deploy $(ISO_URL) --state $(STATE)
 
-wait-install:
-	$(PYTHON) $(SCRIPT) wait-install
+insert: build
+	./$(BINARY) insert $(ISO_URL) --state $(STATE)
 
-remediate-mco:
-	$(PYTHON) $(SCRIPT) remediate-mco
+wait-install: build
+	./$(BINARY) wait-install --state $(STATE)
 
-# ---- iDRAC operations -------------------------------------------------------
+wait-install-remediate: build
+	./$(BINARY) wait-install-maybe-remediate --state $(STATE)
 
-status:
-	$(PYTHON) $(SCRIPT) status
+wait-api-ready: build
+	./$(BINARY) wait-api-ready --state $(STATE)
 
-eject:
-	$(PYTHON) $(SCRIPT) eject
+remediate-mco: build
+	./$(BINARY) remediate-mco --state $(STATE)
 
-set-boot-cd:
-	$(PYTHON) $(SCRIPT) set-boot-cd
+# ---- iDRAC operations --------------------------------------------------------
 
-set-boot-hdd:
-	$(PYTHON) $(SCRIPT) set-boot-hdd
+status: build
+	./$(BINARY) status --state $(STATE)
 
-restart:
-	$(PYTHON) $(SCRIPT) restart
+eject: build
+	./$(BINARY) eject --state $(STATE)
 
-power-on:
-	$(PYTHON) $(SCRIPT) power-on
+set-boot-cd: build
+	./$(BINARY) set-boot-cd --state $(STATE)
 
-power-off:
-	$(PYTHON) $(SCRIPT) power-off
+set-boot-hdd: build
+	./$(BINARY) set-boot-hdd --state $(STATE)
 
-wait-power-on:
-	$(PYTHON) $(SCRIPT) wait-power-on
+restart: build
+	./$(BINARY) restart --state $(STATE)
 
-# ---- Testing -----------------------------------------------------------------
+power-on: build
+	./$(BINARY) power-on --state $(STATE)
+
+power-off: build
+	./$(BINARY) power-off --state $(STATE)
+
+wait-power-on: build
+	./$(BINARY) wait-power-on --state $(STATE)
+
+# ---- Day-2 / operations ------------------------------------------------------
+
+# day2 delegates to the CLI `day2` subcommand. Use DAY2_SUB to select the
+# phase, e.g.: make day2 DAY2_SUB="phases --phase1"   (space is significant).
+day2: build
+	./$(BINARY) day2 $(DAY2_SUB) --state $(STATE)
+
+operator-config: build
+	./$(BINARY) day2 operator-config --state $(STATE)
+
+node-exporter: build
+	./$(BINARY) node-exporter --state $(STATE)
+
+diagnostics: build
+	./$(BINARY) diagnostics --state $(STATE)
+
+sol: build
+	./$(BINARY) sol $(SOL_ARGS) --state $(STATE)
+
+# ---- State inspection --------------------------------------------------------
+
+state-validate:
+	./$(BINARY) state validate $(STATE)
+
+state-plan:
+	./$(BINARY) state plan $(STATE)
+
+# ---- Testing / quality -------------------------------------------------------
 
 test:
-	$(PYTEST) $(TEST_FILE) -v
+	$(GO) test ./... -v
 
 test-verbose:
-	$(PYTEST) $(TEST_FILE) -v -s
+	$(GO) test ./... -v
 
 test-coverage:
-	$(PYTEST) $(TEST_FILE) -v --cov=idrac_sushy --cov-report=term-missing --cov-report=html
+	$(GO) test ./... -cover
 
-lint:
-	$(PYTHON) -m flake8 $(SCRIPT) $(TEST_FILE) --max-line-length=120 --ignore=E501,W503
+fmt:
+	gofmt -w .
+
+vet:
+	$(GO) vet ./...
+
+lint: fmt vet

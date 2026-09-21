@@ -102,30 +102,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Python dependencies
-        run: make deps
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build the Go installer
+        run: make build
 
       - name: Run SNO install
         id: install
         run: |
           set -eo pipefail
-          export PATH="$PWD/.venv/bin:$PATH"
           export INSTALL_WAIT_ATTEMPTS="${{ inputs.install_wait_attempts }}"
           export REMEDIATION_INSTALL_WAIT_ATTEMPTS="${{ inputs.remediation_install_wait_attempts }}"
           export API_READY_WAIT_SEC="${{ inputs.api_ready_wait_sec }}"
           export API_READY_SETTLE_SEC="${{ inputs.api_ready_settle_sec }}"
           export API_READY_STABLE_POLLS="${{ inputs.api_ready_stable_polls }}"
           export API_READY_POLL_SEC="${API_READY_POLL_SEC:-15}"
+          export ISO_HTTP_PROBE="${{ inputs.iso_http_probe }}"
+          export POST_COPY_ISO_SLEEP_SEC="${{ inputs.post_copy_iso_sleep_sec }}"
+          export IDRAC_DEPLOY_AFTER_INSERT_SEC="${{ inputs.idrac_deploy_after_insert_sec }}"
+          export IDRAC_DEPLOY_BEFORE_RESTART_SEC="${{ inputs.idrac_deploy_before_restart_sec }}"
+          export IDRAC_DEPLOY_AFTER_RESTART_SEC="${{ inputs.idrac_deploy_after_restart_sec }}"
           export RELEASE_IMAGE="${{ inputs.release_image }}"
+          export IDRAC_USER="root"
+          export IDRAC_PW="${{ secrets.IDRAC_PW }}"
           make install \
             OCP_VERSION="${{ inputs.ocp_version }}" \
-            RELEASE_IMAGE="${{ inputs.release_image }}" \
-            IDRAC_IP="192.168.1.228" \
-            IDRAC_USER="root" \
-            IDRAC_PW="${{ secrets.IDRAC_PW }}"
+            RELEASE_IMAGE="${{ inputs.release_image }}"
+
       - name: Collect install diagnostics (failure)
         if: failure()
-        run: chmod +x scripts/collect_abi_install_diagnostics.sh && scripts/collect_abi_install_diagnostics.sh
+        run: make diagnostics
 
       - name: Upload ABI install diagnostics (failure)
         if: failure()
@@ -136,77 +145,16 @@ jobs:
           retention-days: 7
 
       - name: Wait for API before Day-2
-        run: |
-          set -euo pipefail
-          export PATH="$PWD/.venv/bin:$PATH"
-          # Reuse the same readiness gate as install retries (handles late MCO reboot).
-          python3 - <<'PY'
-          import idrac_sushy
-          from types import SimpleNamespace
-          args = SimpleNamespace(
-              api_ready_wait_sec=None,
-              api_ready_poll_sec=None,
-              api_ready_settle_sec=None,
-              api_ready_stable_polls=None,
-              cluster_ip="192.168.1.133",
-          )
-          ok = idrac_sushy.wait_for_api_ready(
-              "workdir/auth/kubeconfig",
-              workdir="workdir",
-              args=args,
-              label="API (pre Day-2)",
-          )
-          raise SystemExit(0 if ok else 1)
-          PY
+        run: ./sno-installer wait-api-ready --state config/sno-state.yaml
 
       - name: Wait for Cluster Operators
-        run: |
-          set -euo pipefail
-          # Retry oc wait across transient API flaps (SNO reboot / apiserver restart).
-          attempts=6
-          for i in $(seq 1 "$attempts"); do
-            echo "oc wait clusteroperators (attempt $i/$attempts) ..."
-            if oc --kubeconfig="${KUBECONFIG_PATH}" wait --for=condition=Available \
-                clusteroperators --all --timeout=1800s; then
-              exit 0
-            fi
-            echo "oc wait failed; probing API before retry ..."
-            curl -sk --connect-timeout 5 -m 10 -o /dev/null \
-              "https://${CLUSTER_IP}:6443/readyz" || true
-            sleep 30
-          done
-          exit 1
+        run: ./sno-installer day2 wait-co --state config/sno-state.yaml
 
-      # Phase 1: storage/network OwnNamespace operators first so LVMS/SR-IOV
-      # InstallPlans exist before AllNamespaces operators (GitOps/RHOAI/SNR)
-      # flood OLM with copied CSVs.
-      - name: Apply critical operator-install manifests
-        run: ./scripts/apply-operator-install.sh --phase1-only
+      - name: Apply operator day-2 (phases + OLM/CRs + zoneinfo)
+        run: ./sno-installer day2 post-install abi-master-0/extra-manifests/node-exporter-zoneinfo --state config/sno-state.yaml
 
       - name: Validate no degraded operators
-        run: |
-          degraded=$(oc --kubeconfig="${KUBECONFIG_PATH}" get clusteroperators -o json | jq -r '.items[] | select(.status.conditions[] | select(.type=="Degraded" and .status=="True")) | .metadata.name')
-          if [[ -n "$degraded" ]]; then
-            echo "❌ Degraded operators detected: $degraded"
-            exit 1
-          fi
-          echo "✅ No degraded Operators"
-
-      # InstallPlan wait/approval, CSV waits, and operator CRs are implemented in
-      # scripts/apply_operator_config.py (kubernetes Python client; requires make deps).
-      - name: Apply operator-config (InstallPlans, LVMS/SR-IOV, manifests)
-        run: ./.venv/bin/python3 scripts/apply_operator_config.py --kubeconfig="${KUBECONFIG_PATH}"
-
-      # Phase 2: AllNamespaces operators + MinIO (PVC needs lvms-vg1 StorageClass).
-      - name: Apply remaining operator-install manifests
-        run: |
-          set -euo pipefail
-          ./scripts/apply-operator-install.sh --phase2-only
-          ./.venv/bin/python3 scripts/apply_operator_config.py \
-            --kubeconfig="${KUBECONFIG_PATH}" --approve-only
-
-      - name: Apply node-exporter-zoneinfo (monitoring)
-        run: oc apply --kubeconfig="${KUBECONFIG_PATH}" -k abi-master-0/extra-manifests/node-exporter-zoneinfo/
+        run: ./sno-installer day2 degraded-check --state config/sno-state.yaml
 
       - name: Upload auth artifact for kubeconfig
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

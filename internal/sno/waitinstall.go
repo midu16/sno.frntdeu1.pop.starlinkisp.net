@@ -8,6 +8,14 @@ import (
 // WaitInstall mirrors cmd_wait_install: run openshift-install wait-for
 // install-complete with retries, gating each retry on kube-apiserver
 // readiness (SNO MCO reboots produce "no route to host" windows).
+//
+// The monitoring command is the exact canonical form:
+//
+//	./openshift-install wait-for install-complete --dir ./workdir/
+//
+// (the installer is run through i.Cfg.WorkDir; the "agent" sub-command prefix
+// is not required — `wait-for install-complete` waits on the cluster the same
+// way and is the form the workflow relies on.)
 func (i *Installer) WaitInstall() error {
 	installer := i.Cfg.Installer
 	if !fileExists(installer) {
@@ -15,7 +23,7 @@ func (i *Installer) WaitInstall() error {
 	}
 	kubeconfig := i.Cfg.KubeconfigPath()
 	os.Setenv("KUBECONFIG", kubeconfig)
-	args := []string{"agent", "wait-for", "install-complete", "--dir", i.Cfg.WorkDir}
+	args := []string{"wait-for", "install-complete", "--dir", i.Cfg.WorkDir}
 
 	attempts := i.Cfg.InstallWaitAttempts
 	for attempt := 1; attempt <= attempts; attempt++ {

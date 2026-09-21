@@ -25,7 +25,7 @@ spec:
   openshift:
     # GA / pre-GA version (X.Y.Z[-ec/fc/rc.N]). For CI nightlies or mirrored
     # images set releaseImage to the full pullspec instead (it wins).
-    version: "5.0.0-ec.6"
+    version: "5.0.0-rc.2"
     # pull secret (docker config.json) — referenced, never embedded
     pullSecretFile: ~/.docker/config.json
     # node SSH public key — referenced, never embedded
@@ -66,7 +66,6 @@ spec:
     - abi-master-0/openshift/99-kdump-master.yaml
     - abi-master-0/openshift/99-masters-chrony-configuration.yaml
     - abi-master-0/openshift/99-masters-disable-crio-wipe.yaml
-    - abi-master-0/openshift/99-masters-relaxed-signature-policy.yaml
     - abi-master-0/openshift/99-static-pod-check-workaround-master.yaml
     - abi-master-0/openshift/cgroupv2.yaml
     - abi-master-0/openshift/crio-capabilities-master.yaml
